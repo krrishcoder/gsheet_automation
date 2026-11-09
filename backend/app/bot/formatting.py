@@ -104,10 +104,9 @@ def _preview_line(record: LoaderReportRecord) -> str:
 def render_issues(issues: list[ValidationIssue]) -> list[str]:
     lines = []
     for issue in issues:
-        if issue.loader_number is not None and issue.severity == IssueSeverity.ERROR:
-            continue  # shown on the loader's own line
-        prefix = f"{loader_label(issue.loader_number)}: " if issue.loader_number is not None else ""
-        lines.append(f"⚠️ {prefix}{h(issue.message)}")
+        if issue.loader_number is not None:
+            continue  # shown under the loader's own line
+        lines.append(f"⚠️ {h(issue.message)}")
     return lines
 
 
@@ -124,6 +123,12 @@ def render_summary(report: OperationalReport, *, ttl_minutes: int) -> str:
     for record in report.records:
         lines.append(f"• <b>{loader_label(record.loader_number)}</b>: {_figures(record)}")
         lines.append(_preview_line(record))
+        if record.processing_status == RecordStatus.READY:
+            lines += [
+                f"   ⚠️ {h(i.message)}"
+                for i in issues
+                if i.loader_number == record.loader_number and i.severity == IssueSeverity.WARNING
+            ]
     if not report.records:
         lines.append("(none)")
 

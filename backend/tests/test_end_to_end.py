@@ -387,3 +387,61 @@ def test_report_date_drives_monthly_tab_selection(bot, container):
     bot.confirm(bot.send(SAMPLE_REPORT.replace("06/11/2026", "31/10/2026")))
     assert ws_oct.value(f"D{rows_oct[date(2026, 10, 31)]}") == 21
     assert all(c[1] != 4 for c in ws_nov.cells if c[0] >= 4)
+
+
+REPORT_0811_SHIFT3 = """*LOADER REPORT - CHP*
+*DATE*:- 08/11/2026
+*SHIFT*:- 3rd Shift 
+
+*LOADER - 01*
+Trip:- 30Qty:- 935.450
+
+*LOADER - 05*
+Trip:- 31 Qty:- 963.370
+
+*LOADER - 11*
+Trip:- 30 Qty:- 929.380
+
+
+*PC - 15*
+Trip:- Nil Qty:- Nil
+
+*PC - 21*
+Trip:- Nil Qty:- Nil
+
+*Total Trip*:- 91
+*Total Qty*:- 2828.200"""
+
+
+def test_glued_qty_label_still_writes_the_weight(bot, container):
+    """Regression: 'Trip:- 30Qty:- 935.450' used to write only the trips for Loader 01."""
+    tabs = {n: add_loader(container, n) for n in (1, 5, 11)}
+    summary = bot.send(REPORT_0811_SHIFT3)
+    assert "<b>Loader 01</b>: 30 trips · 935.450 MT" in summary["text"]
+    assert "91 trips · 2828.200 MT ✅ match" in summary["text"]
+    bot.confirm(summary)
+    day = date(2026, 11, 8)
+    for n, (trips, weight) in {1: (30, 935.45), 5: (31, 963.37), 11: (30, 929.38)}.items():
+        ws, rows = tabs[n]
+        assert (ws.value(f"J{rows[day]}"), ws.value(f"K{rows[day]}")) == (trips, weight)
+
+
+def test_unreadable_value_blocks_only_that_loader(bot, container):
+    tabs = {n: add_loader(container, n) for n in (1, 11)}
+    text = REPORT_0811_SHIFT3.replace("Trip:- 30Qty:- 935.450", "Trip:- 30 Qty:- MT 935").replace("*LOADER - 05*", "x")
+    summary = bot.send(text)
+    assert "Qty: could not read 'MT 935'" in summary["text"]
+    bot.confirm(summary)
+    day = date(2026, 11, 8)
+    ws1, rows1 = tabs[1]
+    assert ws1.value(f"J{rows1[day]}") is None  # nothing half-written for Loader 01
+    ws11, rows11 = tabs[11]
+    assert ws11.value(f"K{rows11[day]}") == 929.38
+
+
+def test_loader_warning_is_shown_under_that_loader(bot, container):
+    add_loader(container, 11)
+    text = bot.send("DATE:- 06/11/2026\nSHIFT:- 1st Shift\nLOADER - 11\nTrip:- 21 Qty:- Nil")["text"]
+    lines = text.split("\n")
+    i = next(k for k, line in enumerate(lines) if "<b>Loader 11</b>" in line)
+    assert "Qty is Nil/missing" in lines[i + 2]

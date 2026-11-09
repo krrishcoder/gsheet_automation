@@ -168,3 +168,23 @@ def test_parse_decimal_grouping():
 
 def test_normalize_text_strips_markup():
     assert normalize_text("*DATE*:- 06/11/2026\r\n\n  _x_  ") == "DATE:- 06/11/2026\nx"
+
+
+@pytest.mark.parametrize(
+    "body",
+    ["Trip:- 30Qty:- 935.450", "Trip:-30Qty:-935.450", "Qty:- 935.450Trip:- 30", "TRIP:- 30QTY:-935.450 MT"],
+)
+def test_labels_glued_to_the_previous_value(body):
+    entry = parse_report(_report(body=f"LOADER - 01\n{body}")).loaders[0]
+    assert (entry.trips, entry.quantity_mt, entry.error) == (30, Decimal("935.450"), None)
+
+
+def test_label_with_unreadable_value_is_an_error_not_missing():
+    entry = parse_report(_report(body="LOADER - 01\nTrip:- 30 Qty:- MT 935")).loaders[0]
+    assert entry.quantity_mt is None and "Qty: could not read 'MT 935'" in entry.error
+
+
+def test_blank_value_stays_missing():
+    entry = parse_report(_report(body="LOADER - 01\nTrip:- 30 Qty:-\nLOADER - 05\nTrip:- Qty:- 12")).loaders
+    assert (entry[0].trips, entry[0].quantity_mt, entry[0].error) == (30, None, None)
+    assert (entry[1].trips, entry[1].quantity_mt, entry[1].error) == (None, Decimal("12"), None)

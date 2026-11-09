@@ -22,7 +22,8 @@ def test_set_sheet_validates_url_and_checks_access(bot, container):
     assert "not accessible yet" in reply["text"]  # not shared with the service account yet
     container.sheets.add_worksheet(sheet_id(11), build_month_sheet("Loader 11 nov 2026", 2026, 11)[0])
     reply = bot.send(f"/set_sheet loader-11 {URL}", user_id=ADMIN_ID)
-    assert "updated" in reply["text"] and "Access OK" in reply["text"] and "'Loader 11 nov 2026'" in reply["text"]
+    assert "already uses this spreadsheet" in reply["text"] and "Access OK" in reply["text"]
+    assert "'Loader 11 nov 2026'" in reply["text"]
     with container.db.session() as s:
         loader = s.scalars(select(Loader)).one()
         assert (loader.loader_number, loader.spreadsheet_id) == (11, sheet_id(11))
@@ -129,3 +130,97 @@ def test_commands_for_other_bots_are_ignored(make_container):
     bot = Bot(container)
     assert bot.send("/help@SomeOtherBot", user_id=ADMIN_ID) == {}
     assert "/set_sheet" in bot.send("/help@loaderreportbot", user_id=ADMIN_ID)["text"]
+
+
+
+# --- One spreadsheet holding tabs for several loaders --------------------------------------------
+
+SHARED_ID = "shared-loaders-abcdefghijklmnop"
+SHARED_URL = f"https://docs.google.com/spreadsheets/d/{SHARED_ID}/edit#gid=123"
+
+
+def shared_spreadsheet(container):
+    """Like the real file: 'Loader 11 nov 2026', 'Loader 01 nov 2026', 'Loader 05 nov 2026' (+ noise tabs)."""
+    from datetime import date
+
+    from tests.fakes import FakeWorksheet
+
+    container.today = lambda: date(2026, 11, 9)
+    container.sheets.add_spreadsheet(SHARED_ID, title="CHP loaders")
+    tabs = {}
+    for n in (11, 1, 5):
+        ws, rows = build_month_sheet(f"Loader {n:02d} nov 2026", 2026, 11, loader_number=n)
+        container.sheets.add_worksheet(SHARED_ID, ws)
+        tabs[n] = (ws, rows)
+    container.sheets.add_worksheet(SHARED_ID, FakeWorksheet("Sept 2026"))
+    container.sheets.add_worksheet(SHARED_ID, FakeWorksheet("Loader 12"))
+    return tabs
+
+
+def test_set_sheet_without_numbers_registers_every_loader_tab(bot, container):
+    shared_spreadsheet(container)
+    text = bot.send(f"/set_sheet {SHARED_URL}", user_id=ADMIN_ID)["text"]
+    assert "✅ Loader 01 registered · November tab: 'Loader 01 nov 2026' (auto-selected)" in text
+    assert "✅ Loader 05 registered · November tab: 'Loader 05 nov 2026'" in text
+    assert "✅ Loader 11 registered · November tab: 'Loader 11 nov 2026'" in text
+    assert "✅ Loader 12 registered" in text and "No worksheet configured for November 2026" in text
+    with container.db.session() as s:
+        loaders = {l.loader_number: l.spreadsheet_id for l in s.scalars(select(Loader))}
+    assert loaders == {1: SHARED_ID, 5: SHARED_ID, 11: SHARED_ID, 12: SHARED_ID}  # "Sept 2026" is not a loader
+
+
+def test_set_sheet_with_several_numbers(bot, container):
+    shared_spreadsheet(container)
+    text = bot.send(f"/set_sheet 1 5 {SHARED_URL}", user_id=ADMIN_ID)["text"]
+    assert "Loader 01 registered" in text and "Loader 05 registered" in text
+    assert "also has tabs for Loader 11, Loader 12" in text
+    with container.db.session() as s:
+        assert sorted(l.loader_number for l in s.scalars(select(Loader))) == [1, 5]
+
+
+def test_set_sheet_single_loader_points_out_other_loader_tabs(bot, container):
+    shared_spreadsheet(container)
+    text = bot.send(f"/set_sheet 11 {SHARED_URL}", user_id=ADMIN_ID)["text"]
+    assert "also has tabs for Loader 01, Loader 05, Loader 12" in text
+    assert "<code>/set_sheet 1 5 12 &lt;URL&gt;</code>" in text
+
+
+def test_set_sheet_without_numbers_never_moves_a_loader_from_another_spreadsheet(bot, container):
+    shared_spreadsheet(container)
+    add_loader(container, 1)  # Loader 01 already has its own spreadsheet
+    text = bot.send(f"/set_sheet {SHARED_URL}", user_id=ADMIN_ID)["text"]
+    assert "Loader 01 has a tab here but already uses another spreadsheet — not changed" in text
+    with container.db.session() as s:
+        assert s.scalars(select(Loader).where(Loader.loader_number == 1)).one().spreadsheet_id == sheet_id(1)
+
+
+def test_set_sheet_without_numbers_needs_access(bot, container):
+    text = bot.send("/set_sheet https://docs.google.com/spreadsheets/d/unknown-sheet-abcdefghijk/edit", user_id=ADMIN_ID)["text"]
+    assert "Could not open the spreadsheet" in text
+    assert "Usage" in bot.send("/set_sheet 11", user_id=ADMIN_ID)["text"]
+
+
+def test_report_updates_each_loader_tab_of_one_spreadsheet(bot, container):
+    tabs = shared_spreadsheet(container)
+    bot.send(f"/set_sheet {SHARED_URL}", user_id=ADMIN_ID)
+    summary = bot.send(SAMPLE_REPORT, user_id=ADMIN_ID)
+    for n in (1, 5, 11):
+        assert f"'Loader {n:02d} nov 2026' (tab auto-selected)" in summary["text"]
+    result = bot.confirm(summary, user_id=ADMIN_ID)
+    assert result["text"].startswith("✅ SUCCESS")
+    expected = {1: (42, 1340.84, 31.92), 5: (43, 1411.93, 32.84), 11: (21, 696.38, 33.16)}
+    for n, (trips, weight, avg) in expected.items():
+        ws, rows = tabs[n]
+        r = rows[REPORT_DATE]
+        assert (ws.value(f"D{r}"), ws.value(f"E{r}"), ws.value(f"F{r}")) == (trips, weight, avg)
+    # each write went to its own tab of the same file
+    assert sorted(w[1] for w in container.sheets.writes) == ["Loader 01 nov 2026", "Loader 05 nov 2026", "Loader 11 nov 2026"]
+    assert {w[0] for w in container.sheets.writes} == {SHARED_ID}
+
+
+def test_summary_points_to_tab_of_unregistered_loader(bot, container):
+    shared_spreadsheet(container)
+    bot.send(f"/set_sheet 11 {SHARED_URL}", user_id=ADMIN_ID)
+    text = bot.send(SAMPLE_REPORT, user_id=ADMIN_ID)["text"]
+    assert "Loader 01 is not registered, but tab 'Loader 01 nov 2026' is in the spreadsheet of Loader 11" in text
+    assert "Loader 05 is not registered, but tab 'Loader 05 nov 2026'" in text

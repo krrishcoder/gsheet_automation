@@ -50,7 +50,7 @@ from app.services.sheet_layout import (
     read_row_state,
     shift_columns,
 )
-from app.services.worksheet_service import WorksheetResolutionError, resolve_worksheet
+from app.services.worksheet_service import WorksheetResolutionError, resolve_worksheet, title_matches
 
 log = logging.getLogger(__name__)
 
@@ -184,6 +184,7 @@ class ReportProcessor:
         outcomes = {
             inp.record_id: self._preview_one(inp, report_date, shift, submitter_is_admin, info_cache) for inp in inputs
         }
+        self._hint_unregistered_tabs(inputs, outcomes, info_cache, report_date)
 
         with self.db.session() as session:
             repo = ReportRepository(session)
@@ -203,6 +204,40 @@ class ReportProcessor:
             if not ready:
                 report.completed_at = utcnow()
             return report
+
+    @staticmethod
+    def _hint_unregistered_tabs(
+        inputs: list[_PreviewInput],
+        outcomes: dict[int, PreviewOutcome],
+        info_cache: dict[str, SpreadsheetInfo | SheetsError],
+        report_date: date,
+    ) -> None:
+        """An unregistered loader whose tab sits in a spreadsheet this report already opened (one file,
+        many loader tabs) gets a pointer to it. Only a hint: nothing is written to an unregistered loader."""
+        owners: dict[str, int] = {}
+        for inp in inputs:
+            if inp.spreadsheet_id and inp.spreadsheet_id not in owners:
+                owners[inp.spreadsheet_id] = inp.loader_number
+        for inp in inputs:
+            outcome = outcomes[inp.record_id]
+            if outcome.error_code != "LOADER_NOT_CONFIGURED":
+                continue
+            n = inp.loader_number
+            for spreadsheet_id, info in info_cache.items():
+                if not isinstance(info, SpreadsheetInfo):
+                    continue
+                tabs = [
+                    t for t in info.worksheet_titles
+                    if title_matches(t, loader_number=n, year=report_date.year, month=report_date.month)
+                ]
+                if tabs:
+                    owner = owners.get(spreadsheet_id)
+                    outcome.message = (
+                        f"Loader {n:02d} is not registered, but tab '{tabs[0]}' is in the spreadsheet of "
+                        f"Loader {owner:02d} (admin: /set_sheet {n} <that link>, or /set_sheet <that link> "
+                        "to register every loader tab in it)"
+                    )
+                    break
 
     def _spreadsheet_info(self, spreadsheet_id: str, cache: dict[str, SpreadsheetInfo | SheetsError]) -> SpreadsheetInfo:
         if spreadsheet_id not in cache:

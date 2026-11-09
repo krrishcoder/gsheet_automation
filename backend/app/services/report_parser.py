@@ -74,19 +74,26 @@ _SHIFT_TOKENS = {
     "first": 1, "second": 2, "third": 3, "one": 1, "two": 2, "three": 3,
 }
 
+# Labels may be glued to the previous value ("Trip:- 30Qty:- 935.450"), so they start at any
+# non-letter rather than at a word boundary (a digit followed by a letter is not a boundary).
+_LABEL_START = r"(?<![a-z])"
 _EQUIPMENT_RE = re.compile(
-    r"\b(?P<kind>loader|ldr|pc)(?![a-z])\.?\s*(?:no\.?|number|#)?\s*[-:#.]*\s*(?P<num>\d{1,3})(?!\d)",
+    rf"{_LABEL_START}(?P<kind>loader|ldr|pc)(?![a-z])\.?\s*(?:no\.?|number|#)?\s*[-:#.]*\s*(?P<num>\d{{1,3}})(?!\d)",
     re.I,
 )
-_TOTAL_RE = re.compile(r"\btotal\b", re.I)
-_TRIP_RE = re.compile(rf"\btrips?\b\.?{_SEP}(?P<val>{_VALUE})?", re.I)
+_TOTAL_RE = re.compile(rf"{_LABEL_START}total\b", re.I)
+_TRIP_RE = re.compile(rf"{_LABEL_START}trips?\b\.?{_SEP}(?P<val>{_VALUE})?", re.I)
 _QTY_RE = re.compile(
-    rf"\b(?:qty|qnty|qnt|quantity|quantities|wt|weight|tonnage)\b\.?{_SEP}(?P<val>{_VALUE})?", re.I
+    rf"{_LABEL_START}(?:qty|qnty|qnt|quantity|quantities|wt|weight|tonnage)\b\.?{_SEP}(?P<val>{_VALUE})?", re.I
 )
-_TOTAL_TRIP_RE = re.compile(rf"\btotal\s*(?:no\.?\s*of\s*)?trips?\b\.?{_SEP}(?P<val>{_VALUE})?", re.I)
+_TOTAL_TRIP_RE = re.compile(rf"{_LABEL_START}total\s*(?:no\.?\s*of\s*)?trips?\b\.?{_SEP}(?P<val>{_VALUE})?", re.I)
 _TOTAL_QTY_RE = re.compile(
-    rf"\btotal\s*(?:qty|qnty|qnt|quantity|wt|weight|tonnage)\b\.?{_SEP}(?P<val>{_VALUE})?", re.I
+    rf"{_LABEL_START}total\s*(?:qty|qnty|qnt|quantity|wt|weight|tonnage)\b\.?{_SEP}(?P<val>{_VALUE})?", re.I
 )
+# A label word anywhere in a loader's section. If one is there but its value could not be read,
+# the loader is blocked instead of being written with that value silently missing.
+_TRIP_WORD_RE = re.compile(r"trip", re.I)
+_QTY_WORD_RE = re.compile(r"qty|qnty|qnt|quantit|weight|tonnage", re.I)
 
 _MONTHS = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
@@ -166,6 +173,10 @@ class _Field:
     value: str | None = None
     is_nil: bool = False
     present: bool = False
+    unreadable: str | None = None  # label found, followed by text that is not a value
+
+
+_NEXT_LABEL_RE = re.compile(r"(?:trips?|qty|qnty|qnt|quantity|wt|weight|tonnage|total)\b", re.I)
 
 
 def _read_field(pattern: re.Pattern[str], text: str) -> _Field:
@@ -174,6 +185,11 @@ def _read_field(pattern: re.Pattern[str], text: str) -> _Field:
         return _Field()
     token = match.group("val")
     if token is None:
+        # Blank ("Qty:-" at the end of the line or right before the next label) means missing;
+        # anything else after the label ("Qty:- MT 935") is unreadable and must not be ignored.
+        rest = text[match.end():].split("\n", 1)[0].strip()
+        if rest and not _NEXT_LABEL_RE.match(rest):
+            return _Field(present=True, unreadable=rest[:25])
         return _Field(present=True)
     if _NIL_RE.match(token.strip()):
         return _Field(is_nil=True, present=True)
@@ -249,6 +265,13 @@ def _parse_figures(segment: str) -> dict:
     qty_f = _read_field(_QTY_RE, segment)
     values: dict = {"trips_nil": trips_f.is_nil, "quantity_nil": qty_f.is_nil}
     problems: list[str] = []
+    if not trips_f.present and _TRIP_WORD_RE.search(segment):
+        problems.append("Trip: could not read the value — check the spacing in this line")
+    if not qty_f.present and _QTY_WORD_RE.search(segment):
+        problems.append("Qty: could not read the value — check the spacing in this line")
+    for label, field in (("Trip", trips_f), ("Qty", qty_f)):
+        if field.unreadable:
+            problems.append(f"{label}: could not read '{field.unreadable}'")
     if trips_f.value is not None:
         try:
             values["trips"] = parse_int(trips_f.value)

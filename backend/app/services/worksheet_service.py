@@ -65,6 +65,32 @@ def _title_tokens(title: str) -> tuple[set[int], set[int], set[int]]:
     return numbers, years, months
 
 
+_LOADER_WORDS = frozenset({"loader", "loaders", "ldr"})
+
+
+def loader_number_in_title(title: str) -> int | None:
+    """Loader a tab belongs to: the title says "loader" and holds exactly one 1-3 digit number.
+    "Loader 01 nov 2026" -> 1, "Oct loader 08 2026" -> 8, "Sept 2026" / "Loader 11 & 12" -> None."""
+    tokens = re.findall(r"[a-z]+|\d+", title.lower())
+    if not _LOADER_WORDS.intersection(tokens):
+        return None
+    numbers = {int(t) for t in tokens if t.isdigit() and len(t) <= 3}
+    if len(numbers) != 1:
+        return None
+    number = numbers.pop()
+    return number if 1 <= number <= 999 else None
+
+
+def loader_tabs(titles: list[str]) -> dict[int, list[str]]:
+    """{loader number: [tab titles]} for every tab that clearly belongs to one loader."""
+    found: dict[int, list[str]] = {}
+    for title in titles:
+        number = loader_number_in_title(title)
+        if number is not None:
+            found.setdefault(number, []).append(title)
+    return found
+
+
 def title_matches(title: str, *, loader_number: int, year: int, month: int) -> bool:
     numbers, years, months = _title_tokens(title)
     return numbers == {loader_number} and years == {year} and months == {month}

@@ -28,7 +28,7 @@ confirm or correct them before go-live.
 | # | Assumption | Where to change |
 |---|---|---|
 | 1 | The sheets look like the screenshots (headers *Date, HSD Fuel (L), 1st/2nd/3rd Shift × Trips/Weight (MT)/Avg (MT), Day Total Weight/Trips*), either as one header row or a merged "1st Shift" group row above "Trips / Weight / Avg". Columns are located **by header text**, not by fixed letters. Run `/check_sheet <loader>` on each real sheet to confirm detection. | `SHEET_HEADER_*`, `SHEET_COLUMN_MAP` |
-| 2 | Avg (F/I/L) and Day Total (M/N) cells: if they already contain **formulas**, the bot leaves the formulas alone and only writes Trips/Weight. If they hold plain values, the bot writes the computed values. | automatic |
+| 2 | Avg (F/I/L) and Day Total (M/N) cells: if they already contain **formulas**, the bot leaves the formulas alone and only writes Trips/Weight. If they hold plain values, the bot writes the computed values. **Confirmed 2026-11-09:** the live sheets use formulas in C, F, I, L, M and N. | automatic |
 | 3 | "Total Trip"/"Total Qty" in the report cover **all equipment in the message (loaders + PC)**. A mismatch is shown as a warning and never changes loader values. | `validation_service.py` |
 | 4 | Dates are **day-first** (06/11/2026 = 6 Nov). Date cells in the sheet are real dates (serial numbers) or DD-MM-YYYY text. | — |
 | 5 | Shifts are 1st/2nd/3rd (also *first*, *II*, *2nd.shipt*, *Shift 3*…). Names like *A/B/C*, *General*, *Night* are rejected rather than guessed. | `report_parser.py` |
@@ -122,7 +122,7 @@ backend/
 │   ├── schemas/report.py, telegram.py, sheets.py
 │   └── core/config.py, security.py, logging.py
 ├── scripts/set_webhook.py          register / inspect / delete the webhook
-├── tests/                          147 tests, external APIs faked
+├── tests/                          174 tests, external APIs faked
 ├── deploy/Caddyfile                HTTPS reverse proxy (EC2)
 ├── Dockerfile, docker-compose.yml, .env.example, requirements*.txt
 ```
@@ -206,6 +206,22 @@ python scripts/set_webhook.py set
 Repeat `/set_worksheet` every month (or rely on auto-detection when tab names follow the
 *Loader NN mon YYYY* pattern). Changing a spreadsheet URL keeps the month→tab mappings.
 
+**One spreadsheet with tabs for several loaders** (e.g. `Loader 11 nov 2026`, `Loader 01 nov 2026`,
+`Loader 05 nov 2026` in one file): the link identifies the file, never a tab (`#gid=…` is ignored).
+Register it once for all its loaders:
+
+```
+/set_sheet https://docs.google.com/spreadsheets/d/<id>/edit        ← every "Loader NN …" tab in the file
+/set_sheet 1 5 11 https://docs.google.com/spreadsheets/d/<id>/edit ← or exactly these loaders
+```
+
+Each loader then uses only its own tab (chosen from the report's month), and each tab is locked
+separately while it is written. Without loader numbers, a tab counts only if its name contains
+"Loader" and exactly one loader number (`Sept 2026` or `Loader 11 & 12` are ignored), and a loader
+that already uses a different spreadsheet is never moved — the reply lists it instead. If a report
+names a loader that is not registered but its tab is in a spreadsheet the report already uses, the
+summary says so.
+
 ### Commands
 
 | Command | Who | Purpose |
@@ -213,7 +229,7 @@ Repeat `/set_worksheet` every month (or rely on auto-detection when tab names fo
 | `/start`, `/help` | everyone | your Telegram ID, role and commands |
 | `/my_loaders` | user | loaders you may report for |
 | `/my_reports`, `/report <id>` | user | your recent reports, per-loader results |
-| `/set_sheet <loader> <url>` | admin | register / change a loader's spreadsheet (validates the URL, checks access) |
+| `/set_sheet [loader …] <url>` | admin | register / change spreadsheet for one or more loaders; without numbers, for every "Loader NN" tab in the file (validates the URL, checks access, shows each loader's tab) |
 | `/list_loaders`, `/loader_info <loader>` | admin | configuration overview |
 | `/enable_loader`, `/disable_loader <loader>` | admin | stop/resume updates for a loader |
 | `/set_worksheet <loader> <year> <month> "<tab>"` | admin | month → tab mapping (month may be `11` or `nov`) |
@@ -381,7 +397,7 @@ Tables are created at startup (`create_all`).
 
 ## 11. Testing
 
-`pytest` runs 147 tests with fake Telegram and in-memory Google Sheets: parser variants (shifts,
+`pytest` runs 174 tests with fake Telegram and in-memory Google Sheets: parser variants (shifts,
 dates, Nil, PC, duplicates), totals validation, header detection (single/two-tier/merged/moved
 columns/not row 1), date-row matching (serials and text), column mapping, averages and totals,
 preservation of other cells and formulas, worksheet routing, authorisation per loader, corrections
@@ -390,7 +406,7 @@ crash recovery, concurrent updates of one row, job claiming, webhook authenticat
 and the HTTP clients' retry/error mapping.
 
 To run the suite against PostgreSQL: `TEST_DATABASE_URL=postgresql://… pytest`
-(the database is wiped for each test). All 147 tests pass on both SQLite and PostgreSQL 16.
+(the database is wiped for each test). The suite (147 tests at the time) passed in full on PostgreSQL 16.
 
 ---
 

@@ -151,3 +151,23 @@ def test_postgres_engine_disables_prepared_statements_for_poolers(monkeypatch):
     db_module.build_engine("postgresql+psycopg://u:p@localhost:6543/db").dispose()  # no connection is made
     assert captured["connect_args"] == {"prepare_threshold": None}
     assert captured["pool_pre_ping"] is True
+
+
+@pytest.mark.parametrize(
+    "title, number",
+    [
+        ("Loader 11 nov 2026", 11),
+        ("Loader 01 nov 2026", 1),
+        ("loader 08 Nov 2026", 8),
+        ("Oct loader 08 2026", 8),
+        ("Loader12", 12),
+        ("Sept 2026", None),  # no loader word
+        ("Loader 11 & 12 nov 2026", None),  # two loaders: never guessed
+        ("Summary 11 nov 2026", None),
+        ("Loader 00", None),
+    ],
+)
+def test_loader_number_in_tab_title(title, number):
+    from app.services.worksheet_service import loader_number_in_title
+
+    assert loader_number_in_title(title) == number

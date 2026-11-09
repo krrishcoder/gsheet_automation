@@ -21,9 +21,15 @@ from app.database.repositories import (
 )
 from app.schemas.telegram import TgMessage
 from app.services.google_sheets_service import SheetsError
-from app.services.loader_service import ConfigurationError, LoaderService, parse_loader_number
+from app.services.loader_service import ConfigurationError, LoaderService, extract_spreadsheet_id, parse_loader_number
 from app.services.sheet_layout import Col, SheetLayoutError, column_letter, date_rows_summary, detect_layout
-from app.services.worksheet_service import MONTH_NAMES, WorksheetResolutionError, parse_month, resolve_worksheet
+from app.services.worksheet_service import (
+    MONTH_NAMES,
+    WorksheetResolutionError,
+    loader_tabs,
+    parse_month,
+    resolve_worksheet,
+)
 from app.worker.job_queue import JobType, enqueue
 
 log = logging.getLogger(__name__)
@@ -219,35 +225,103 @@ def cmd_report(ctx: CommandContext) -> str:
 # --- Loaders & worksheets (admin) ---------------------------------------------------------------
 
 
-@command("set_sheet", "/set_sheet <loader> <spreadsheet URL>", "Register or change a loader's spreadsheet", admin_only=True)
+@command(
+    "set_sheet",
+    "/set_sheet [loader …] <spreadsheet URL>",
+    "Register a spreadsheet for loaders; without numbers, for every 'Loader NN' tab in it",
+    admin_only=True,
+)
 def cmd_set_sheet(ctx: CommandContext) -> str:
-    number = _loader_arg(ctx.args)
-    if len(ctx.args) < 2:
+    if not ctx.args or not ctx.args[-1].lower().startswith("http"):
         raise UsageError("Spreadsheet URL is missing")
+    url = ctx.args[-1]
+    spreadsheet_id = extract_spreadsheet_id(url)
+    numbers = sorted({parse_loader_number(a) for a in ctx.args[:-1]})
+    try:
+        info, access_error = ctx.container.sheets.get_spreadsheet_info(spreadsheet_id), None
+    except SheetsError as exc:
+        info, access_error = None, exc
+    tabs_by_loader = loader_tabs(info.worksheet_titles) if info else {}
+
+    # Without loader numbers, register every loader that has a "Loader NN …" tab in this file.
+    auto = not numbers
+    if auto:
+        if info is None:
+            return (
+                f"⚠️ Could not open the spreadsheet to look for loader tabs: {h(access_error.message)}\n"
+                "Share it first, or name the loaders: <code>/set_sheet 1 5 11 &lt;URL&gt;</code>"
+            )
+        if not tabs_by_loader:
+            return (
+                "No tabs named like 'Loader 11 nov 2026' were found in this spreadsheet.\n"
+                "Name the loaders instead: <code>/set_sheet 1 5 11 &lt;URL&gt;</code>"
+            )
+        numbers = sorted(tabs_by_loader)
+
+    today = ctx.container.today()
+    outcomes: list[tuple[int, str, str | None]] = []  # (loader, state, configured tab this month)
+    kept_elsewhere: list[int] = []
     with ctx.container.db.session() as session:
-        result = LoaderService(session).set_sheet(number, ctx.args[1], actor=ctx.actor_id)
-        spreadsheet_id = result.loader.spreadsheet_id
-        mappings = len(LoaderRepository(session).list_worksheets(result.loader.id))
-    lines = [
-        f"✅ {loader_label(number)} {'registered' if result.created else 'updated'}.",
-        f"Spreadsheet ID: <code>{h(spreadsheet_id)}</code>",
-    ]
-    if result.previous_url and result.previous_url != ctx.args[1]:
-        lines.append(f"Previous URL: {h(result.previous_url)}")
-        if mappings:
-            lines.append(f"{mappings} worksheet mapping(s) kept — review with /list_worksheets {number}.")
-    lines.append(_access_check(ctx.container, spreadsheet_id))
+        service = LoaderService(session)
+        for number in numbers:
+            existing = service.repo.get_by_number(number)
+            if auto and existing is not None and existing.spreadsheet_id != spreadsheet_id:
+                kept_elsewhere.append(number)  # never move a loader implicitly
+                continue
+            result = service.set_sheet(number, url, actor=ctx.actor_id)
+            if result.created:
+                state = "registered"
+            elif result.previous_url and extract_spreadsheet_id(result.previous_url) == spreadsheet_id:
+                state = "already uses this spreadsheet"
+            else:
+                state = "moved to this spreadsheet (month→tab mappings kept, see /list_worksheets)"
+            outcomes.append((number, state, service.configured_worksheet(result.loader, today.year, today.month)))
+        unregistered_tabs = []
+        for n in sorted(set(tabs_by_loader) - set(numbers)):
+            loader = service.repo.get_by_number(n)
+            if loader is None or loader.spreadsheet_id != spreadsheet_id:
+                unregistered_tabs.append(n)
+
+    if info is not None:
+        tabs = ", ".join(f"'{h(t)}'" for t in info.worksheet_titles[:15])
+        more = " …" if len(info.worksheet_titles) > 15 else ""
+        lines = [f"🔗 Access OK: <b>{h(info.title)}</b>", f"Tabs: {tabs}{more}", ""]
+    else:
+        lines = [f"⚠️ Saved, but the spreadsheet is not accessible yet: {h(access_error.message)}", ""]
+    for number, state, configured in outcomes:
+        lines.append(f"✅ {loader_label(number)} {state}" + _month_tab_note(ctx, number, configured, info, today))
+    for number in kept_elsewhere:
+        lines.append(
+            f"↪️ {loader_label(number)} has a tab here but already uses another spreadsheet — not changed "
+            f"(move it with <code>/set_sheet {number} &lt;URL&gt;</code>)"
+        )
+    if not auto and unregistered_tabs:
+        labels = ", ".join(loader_label(n) for n in unregistered_tabs)
+        lines.append(
+            f"\nℹ️ This spreadsheet also has tabs for {labels}. Register them with "
+            f"<code>/set_sheet {' '.join(str(n) for n in unregistered_tabs)} &lt;URL&gt;</code> "
+            "(or <code>/set_sheet &lt;URL&gt;</code> for every loader tab)."
+        )
     return "\n".join(lines)
 
 
-def _access_check(container: AppContainer, spreadsheet_id: str) -> str:
+def _month_tab_note(ctx: CommandContext, number: int, configured: str | None, info, today) -> str:
+    """Which tab this loader's reports for the current month will use."""
+    if info is None:
+        return ""
     try:
-        info = container.sheets.get_spreadsheet_info(spreadsheet_id)
-    except SheetsError as exc:
-        return f"⚠️ Saved, but the spreadsheet is not accessible yet: {h(exc.message)}"
-    tabs = ", ".join(f"'{h(t)}'" for t in info.worksheet_titles[:15])
-    more = " …" if len(info.worksheet_titles) > 15 else ""
-    return f"🔗 Access OK: <b>{h(info.title)}</b>\nTabs: {tabs}{more}"
+        resolution = resolve_worksheet(
+            loader_number=number,
+            year=today.year,
+            month=today.month,
+            configured_name=configured,
+            available_titles=info.worksheet_titles,
+            auto_detect=ctx.container.settings.worksheet_auto_detect,
+        )
+    except WorksheetResolutionError as exc:
+        return f"\n   ⚠️ {h(exc.message)}"
+    how = "auto-selected" if resolution.auto_detected else "mapped"
+    return f" · {MONTH_NAMES[today.month]} tab: '{h(resolution.worksheet_name)}' ({how})"
 
 
 @command("list_loaders", "/list_loaders", "All loaders and their configuration", admin_only=True)
