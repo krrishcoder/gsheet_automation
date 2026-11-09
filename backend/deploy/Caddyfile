@@ -1,0 +1,14 @@
+# Automatic HTTPS (Let's Encrypt) in front of the bot. Only the webhook and health endpoints
+# are exposed publicly.
+{$DOMAIN} {
+	encode gzip
+
+	@public path /telegram/webhook /health
+	handle @public {
+		reverse_proxy bot:8000
+	}
+
+	handle {
+		respond 404
+	}
+}

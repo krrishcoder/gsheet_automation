@@ -1,0 +1,14 @@
+[project]
+name = "loader-report-bot"
+version = "1.0.0"
+description = "Telegram webhook bot that writes forwarded WhatsApp loader reports into Google Sheets"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = [
+    "error::sqlalchemy.exc.SAWarning",
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated",
+]

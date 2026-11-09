@@ -1,0 +1,35 @@
+# Render Blueprint — native Python runtime (no Docker) using an external PostgreSQL (Neon).
+# Render builds with pip, runs uvicorn and terminates HTTPS.
+services:
+  - type: web
+    name: loader-report-bot
+    runtime: python
+    rootDir: backend
+    region: ohio  # same AWS region as the Neon database (us-east-2) — every query crosses this link
+    plan: starter  # the free plan sleeps after 15 min idle; the first Telegram update then waits ~1 min
+    numInstances: 1  # the background worker runs inside this process
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1 --proxy-headers --forwarded-allow-ips '*'
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      # Secrets: Render asks for these when the Blueprint is first applied.
+      - key: DB_URL  # Neon connection string (the DB_URL value in backend/.env); DATABASE_URL also works
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_WEBHOOK_SECRET
+        sync: false
+      - key: ADMIN_TELEGRAM_IDS
+        sync: false
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON  # the JSON between the quotes in backend/.env
+        sync: false
+      - key: PUBLIC_BASE_URL  # e.g. https://loader-report-bot.onrender.com
+        sync: false
+      - key: TIMEZONE
+        value: Asia/Kolkata
+      - key: CORRECTION_POLICY
+        value: confirm
+      - key: LOG_FORMAT
+        value: json

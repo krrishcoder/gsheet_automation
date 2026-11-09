@@ -1,0 +1,41 @@
+# Default:            docker compose up -d --build                  (bot on 127.0.0.1:8000)
+# With HTTPS (EC2):   DOMAIN=bot.example.com docker compose --profile https up -d --build
+services:
+  bot:
+    build: .
+    image: loader-report-bot:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      GOOGLE_SERVICE_ACCOUNT_FILE: /run/secrets/google-service-account.json
+    volumes:
+      - bot_data:/app/data
+      - ./secrets/google-service-account.json:/run/secrets/google-service-account.json:ro
+    ports:
+      - "127.0.0.1:8000:8000"
+    stop_grace_period: 40s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  caddy:
+    image: caddy:2.8.4
+    profiles: ["https"]
+    restart: unless-stopped
+    depends_on: [bot]
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN to the public host name}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  bot_data:
+  caddy_data:
+  caddy_config:
