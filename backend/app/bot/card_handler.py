@@ -25,7 +25,9 @@ CARD_FORMAT_HELP = (
     "<code>T1</code> <code>T2</code> <code>T3</code> trips of the 1st / 2nd / 3rd shift → Card Details\n"
     "<code>O1</code> … <code>O3</code> opening HM, <code>C1</code> … <code>C3</code> closing HM → Opening and Closing\n"
     "<code>H 132.4 4276.2</code> diesel refill: litres, then the HM at the refill → hsd avg (new row, date "
-    "filled in) and HSD Fuel in Card Details. One <code>H</code> per refill.\n\n"
+    "filled in) and HSD Fuel in Card Details. One <code>H</code> per refill.\n"
+    "<code>T 110</code> (a space, no shift) the day's total trips, for a loader with one row per day "
+    "(Loader 8): <code>L08 10-11 H 120 5355.2 T 110</code> → HSD, HM, Total TRIP and the AVG formula.\n\n"
     "• Send only what you have, e.g. <code>L11 10-11 C3 4291.5</code>; other cells are left as they are.\n"
     "• A value already in the sheet is replaced only after you see it in the preview and confirm.\n"
     "• A refill sent again (same litres and HM) is not added twice.\n"
@@ -73,16 +75,36 @@ def _sections(card: CardEntry) -> list[str]:
     preview = card.preview or {}
     cells = preview.get("cells") or {}
     blocks, rows = preview.get("blocks") or {}, preview.get("rows") or {}
-    by_kind = lambda kind: [(ref, c) for ref, c in cells.items() if c["kind"] == kind]  # noqa: E731
     out: list[str] = []
 
-    trips = by_kind("trips")
+    daily = [(ref, c) for ref, c in cells.items() if c["block"] == "daily"]
+    if daily:
+        out.append(f"{blocks.get('daily', 'Daily table')}, row {rows.get('daily')}")
+        for ref, c in daily:
+            if c["kind"] == "trips":
+                out.append(f"• Total trips: {c['after']} ({ref}, {_state(c)})")
+            elif c["kind"] == "hsd":
+                parts = (["adding " + " + ".join(c["added"])] if c["added"] else []) + (
+                    [" + ".join(c["already"]) + " already in it"] if c["already"] else []
+                )
+                out.append(f"• HSD ({ref}): {', '.join(parts)} → {_litres(c['existing'] + c['added'])}")
+            elif c["key"] == "hm":
+                was = f", was {c['before']}" if c["before"] is not None else ", new"
+                out.append(f"• HM ({ref}): {c['after']}{was}")
+            elif c["kind"] == "avg":
+                avg = next((r.get("avg") for r in preview.get("refills") or [] if r.get("avg")), None)
+                out.append(f"• AVG ({ref}): {c['after']}" + (f" → {avg} L/h" if avg else ""))
+        for r in preview.get("refills") or []:
+            if r.get("target") == "daily" and r["state"] == "already":
+                out.append(f"• {r['litres']} L at HM {r['hm']}: already saved")
+
+    trips = [(ref, c) for ref, c in cells.items() if c["kind"] == "trips" and c["block"] == "card"]
     if trips:
         out.append(f"Trips — {blocks.get('card', 'card block')}, row {rows.get('card')}")
         for ref, c in trips:
             out.append(f"• {_SHIFT[c['shift']]}: {c['after']} ({ref}, {_state(c)}){_chp(c['after'], preview.get('report_trips'), c['shift'])}")
 
-    readings = by_kind("hm")
+    readings = [(ref, c) for ref, c in cells.items() if c["kind"] == "hm"]
     if readings:
         out.append(f"Hour meter — {blocks.get('hm', 'HM block')}, row {rows.get('hm')}")
         for shift in (1, 2, 3):
@@ -95,7 +117,7 @@ def _sections(card: CardEntry) -> list[str]:
                 hours = ((preview.get("hours") or {}).get(str(shift)) or {}).get("hours")
                 out.append(f"• {_SHIFT[shift]}: " + " · ".join(parts) + (f" → {hours} h" if hours is not None else ""))
 
-    refills = preview.get("refills") or []
+    refills = [r for r in preview.get("refills") or [] if r.get("target") != "daily"]
     if refills:
         out.append(f"Diesel refills — {blocks.get('log', 'refill log')}")
         for r in refills:
@@ -105,7 +127,7 @@ def _sections(card: CardEntry) -> list[str]:
                 avg = f" · avg {r['avg']} L/h" if r.get("avg") else " · avg: no earlier refill to compare"
                 out.append(f"• {r['litres']} L at HM {r['hm']} → new row {r['row']}{avg}")
 
-    for ref, c in by_kind("hsd"):
+    for ref, c in [(ref, c) for ref, c in cells.items() if c["kind"] == "hsd" and c["block"] == "card"]:
         parts = []
         if c["added"]:
             parts.append("adding " + " + ".join(c["added"]))
@@ -146,7 +168,11 @@ def render_card_result(card: CardEntry) -> str:
     for ref, c in (preview.get("cells") or {}).items():
         if c["before"] == c["after"]:
             continue
-        if c["kind"] == "trips":
+        if c["block"] == "daily":
+            label = {"trips": "Total trips", "hsd": "HSD", "avg": "AVG"}.get(c["kind"], "HM")
+            value = _litres(c["existing"] + c["added"]) if c["kind"] == "hsd" else c["after"]
+            lines.append(f"• {label} {h(value)} ({ref})")
+        elif c["kind"] == "trips":
             lines.append(f"• {_SHIFT[c['shift']]} shift trips {c['after']} ({ref})")
         elif c["kind"] == "hm":
             what = "opening" if c["key"].startswith("open") else "closing"
@@ -156,7 +182,8 @@ def render_card_result(card: CardEntry) -> str:
     for r in preview.get("refills") or []:
         if r["state"] == "new":
             avg = f", avg {r['avg']} L/h" if r.get("avg") else ""
-            lines.append(f"• Refill {r['litres']} L at HM {r['hm']} → row {r['row']}{avg}")
+            where = "" if r.get("target") == "daily" else f" → row {r['row']}"
+            lines.append(f"• Refill {r['litres']} L at HM {r['hm']}{where}{avg}")
     return "\n".join(lines)
 
 
@@ -206,7 +233,8 @@ def handle_card_message(container: AppContainer, update_id: int, message: TgMess
             card = CardEntry(
                 loader_number=parsed.loader_number,
                 entry_date=parsed.entry_date,
-                trips={str(k): v for k, v in parsed.trips.items()},
+                trips={str(k): v for k, v in parsed.trips.items()}
+                | ({"total": parsed.total_trips} if parsed.total_trips is not None else {}),
                 hsd_fills=[str(f) for f in parsed.hsd_fills],
                 hm_readings={f"o{k}": str(v) for k, v in parsed.opening.items()}
                 | {f"c{k}": str(v) for k, v in parsed.closing.items()},

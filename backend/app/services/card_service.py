@@ -7,6 +7,9 @@ a day can be filled shift by shift:
 * HM block ("Loader 11 Opening and Closing"): ``O1``-``O3`` / ``C1``-``C3`` hour meter readings
 * refill log ("Loader 11 hsd avg"): one new row per ``H <litres> <HM>`` refill — Date (written by
   the bot), hsd, hm, and the avg formula ``=hsd/(hm - previous hm)``
+* daily table, for a loader kept as one row per day ("Loader 8": Date, HSD, HM, Total TRIP, AVG):
+  ``T <trips>`` the day's trips; a refill adds its litres to HSD, puts the day's latest HM in HM,
+  and AVG gets ``=HSD/(HM - previous day's HM)``
 
 Rules:
 * Trips and HM readings are absolute: a different value already in a cell is shown as a change.
@@ -163,6 +166,12 @@ def plan_card_block(plan: CardPlan, block: Block, row: int, trips: dict[int, int
         if fills:
             raise CardBlocked("NO_HSD_COLUMN", f"'{block.region.title}' has no 'HSD Fuel (L)' column")
         return
+    _plan_fills(plan, block, row, fills)
+
+
+def _plan_fills(plan: CardPlan, block: Block, row: int, fills: list[Decimal]) -> dict | None:
+    """Add fills to the day's HSD cell (kept as a sum, =190+154.98); fills already in it are not
+    added again. Returns the planned cell (None when nothing was sent)."""
     before = _read(block, "hsd", row, "hsd", needed=bool(fills))
     existing = sum_fills(before, block.ref("hsd", row)) if fills else []
     if not fills:
@@ -170,7 +179,7 @@ def plan_card_block(plan: CardPlan, block: Block, row: int, trips: dict[int, int
             plan.day["hsd"] = [fmt_dec(f) for f in sum_fills(before, "")]
         except CardBlocked:
             plan.day["hsd"] = None  # some other formula
-        return
+        return None
     remaining = Counter(existing)
     added, already = [], []
     for fill in fills:
@@ -190,6 +199,60 @@ def plan_card_block(plan: CardPlan, block: Block, row: int, trips: dict[int, int
         existing=[fmt_dec(f) for f in existing], added=[fmt_dec(f) for f in added], already=[fmt_dec(f) for f in already],
     )
     plan.day["hsd"] = [fmt_dec(f) for f in after_fills]
+    return plan.cells[block.ref("hsd", row)]
+
+
+def plan_daily_block(
+    plan: CardPlan, block: Block, row: int, total_trips: int | None, fills: list[Decimal], refills: list[tuple[Decimal, Decimal]]
+) -> None:
+    """One row per day: Total TRIP, HSD (the day's fills), HM (the day's latest refill) and AVG."""
+    plan.rows["daily"], plan.blocks["daily"] = row, block.region.title or ""
+    if total_trips is not None:
+        _value_cell(plan, block, "trips", row, "trips", total_trips, total_trips)
+        plan.day["total"] = total_trips
+    hsd = _plan_fills(plan, block, row, fills)
+    if not refills:
+        return
+    if "hm" not in block.columns:
+        raise CardBlocked("NO_HM_COLUMN", f"'{block.region.title}' has no 'HM' column for the refill's hour meter")
+    hm_ref = block.ref("hm", row)
+    if block.grid.cell(row, block.columns["hm"]).formula:
+        raise CardBlocked("TARGET_HAS_FORMULA", f"{hm_ref} contains a formula; not overwriting it")
+    day_hm = _dec(_read(block, "hm", row, "num", needed=True))
+    previous = None  # (row, HM) of the last earlier day with an HM
+    for r in range(row - 1, block.layout.data_start_row - 1, -1):
+        value = _dec(_read(block, "hm", r, "num", needed=False))
+        if value is not None:
+            previous = (r, value)
+            break
+    already = Counter(Decimal(f) for f in (hsd or {}).get("already", []))
+    entries, new_hms = [], []
+    for litres, hm in sorted(refills, key=lambda x: x[1]):
+        if already[litres] > 0 and day_hm is not None and hm <= day_hm:
+            already[litres] -= 1
+            entries.append({"litres": fmt_dec(litres), "hm": fmt_dec(hm), "state": "already", "target": "daily"})
+            continue
+        if previous is not None and hm <= previous[1]:
+            raise CardBlocked(
+                "HM_NOT_INCREASING",
+                f"Refill at HM {fmt_dec(hm)} is not after the previous refill (HM {fmt_dec(previous[1])}, row {previous[0]}) — check the HM",
+            )
+        new_hms.append(hm)
+        entries.append({"litres": fmt_dec(litres), "hm": fmt_dec(hm), "state": "new", "target": "daily", "row": row})
+    after_hm = max([h for h in (day_hm, *new_hms) if h is not None], default=None)
+    if new_hms and after_hm != day_hm:
+        plan.add(block, "hm", row, "num", None if day_hm is None else fmt_dec(day_hm), fmt_dec(after_hm), float(after_hm))
+    if new_hms and previous is not None and after_hm is not None:
+        total = sum((Decimal(f) for f in plan.day.get("hsd") or []), Decimal(0))
+        avg = fmt_dec((total / (after_hm - previous[1])).quantize(Decimal("0.001")))
+        for entry in entries:
+            if entry["state"] == "new":
+                entry["avg"] = avg
+        if "avg" in block.columns and block.grid.cell(row, block.columns["avg"]).is_empty:
+            hsd_col, hm_col = column_letter(block.columns["hsd"]), column_letter(block.columns["hm"])
+            formula = f"={hsd_col}{row}/({hm_col}{row}-{hm_col}{previous[0]})"  # as the hand-typed =C12/(D12-D11)
+            plan.add(block, "avg", row, "avg", None, formula, formula)
+    plan.refills.extend(entries)
 
 
 def plan_hm_block(plan: CardPlan, block: Block, row: int, opening: dict[int, Decimal], closing: dict[int, Decimal]) -> None:
@@ -282,6 +345,7 @@ class _Input:
     closing: dict[int, Decimal]
     fills: list[Decimal]  # every fill, for HSD Fuel
     refills: list[tuple[Decimal, Decimal]]  # fills with their HM, for the log
+    total_trips: int | None = None  # the day's trips (a loader without shifts)
 
     @classmethod
     def of(cls, card) -> "_Input":
@@ -289,24 +353,13 @@ class _Input:
         return cls(
             loader_number=card.loader_number,
             entry_date=card.entry_date,
-            trips={int(k): v for k, v in (card.trips or {}).items()},
+            trips={int(k): v for k, v in (card.trips or {}).items() if k.isdigit()},
             opening={int(k[1:]): Decimal(v) for k, v in hm.items() if k.startswith("o")},
             closing={int(k[1:]): Decimal(v) for k, v in hm.items() if k.startswith("c")},
             fills=[Decimal(f) for f in card.hsd_fills or []],
             refills=[(Decimal(r["litres"]), Decimal(r["hm"])) for r in card.refills or [] if r.get("hm") is not None],
+            total_trips=(card.trips or {}).get("total"),
         )
-
-    @property
-    def needs(self) -> list[str]:
-        kinds = []
-        hsd_without_hm = len(self.fills) > len(self.refills)
-        if self.trips or hsd_without_hm:
-            kinds.append("card")
-        if self.opening or self.closing:
-            kinds.append("hm")
-        if self.refills:
-            kinds.append("log")
-        return kinds
 
 
 class CardService:
@@ -324,26 +377,47 @@ class CardService:
             grid, loader_number, kind, self.settings.sheet_column_map, scan_rows=self.settings.sheet_header_scan_rows
         )
 
+    def _find(self, grid: SheetGrid, loader_number: int, kind: str) -> Block | None:
+        try:
+            return self._block(grid, loader_number, kind)
+        except SheetLayoutError:
+            return None
+
     def plan(self, grid: SheetGrid, inp: _Input) -> CardPlan:
         """Every cell this entry would write, as the sheet is now. Raises SheetLayoutError / CardBlocked."""
-        plan = CardPlan()
-        needs = inp.needs
-        blocks = {kind: self._block(grid, inp.loader_number, kind) for kind in needs}
-        if "card" not in blocks and inp.fills:
-            try:  # refills also add to the card block's HSD Fuel when the loader has one
-                card = self._block(grid, inp.loader_number, "card")
-            except SheetLayoutError:
-                card = None
-            if card is not None and "hsd" in card.columns:
-                blocks["card"] = card
-        if "card" in blocks:
-            card = blocks["card"]
-            plan_card_block(plan, card, find_date_row(card.grid, card.layout, inp.entry_date), inp.trips, inp.fills)
-        if "hm" in blocks:
-            hm = blocks["hm"]
+        plan, n = CardPlan(), inp.loader_number
+        hsd_only = len(inp.fills) > len(inp.refills)  # long-form "HSD:" fills, without an HM
+        any_trips = bool(inp.trips) or inp.total_trips is not None  # looked up both ways for a helpful error
+        card = self._find(grid, n, "card") if any_trips or inp.fills else None
+        daily = self._find(grid, n, "daily") if any_trips or inp.fills else None
+        if inp.trips and card is None:
+            if daily is not None:
+                raise CardBlocked("USE_TOTAL_TRIPS", f"Loader {n:02d} keeps one 'Total TRIP' per day — send 'T 110' instead of T1/T2/T3")
+            self._block(grid, n, "card")  # raises: explains the missing card block
+        if inp.total_trips is not None and daily is None:
+            if card is not None:
+                raise CardBlocked("USE_SHIFT_TRIPS", f"Loader {n:02d} keeps trips per shift — send T1, T2, T3 instead of 'T'")
+            self._block(grid, n, "daily")
+        hm = self._block(grid, n, "hm") if inp.opening or inp.closing else None
+        log = self._find(grid, n, "log") if inp.refills else None
+        # the day's litres go to the card block's HSD Fuel, or to the daily table's HSD
+        hsd_block = next((b for b in (card, daily) if b is not None and "hsd" in b.columns), None)
+        if hsd_only and hsd_block is None:
+            raise CardBlocked("NO_HSD_COLUMN", f"Loader {n:02d} has no HSD column for the fills")
+        if inp.refills and log is None and (daily is None or "hm" not in daily.columns):
+            self._block(grid, n, "log")  # raises: explains the missing refill log
+        if card is not None:
+            fills = inp.fills if hsd_block is card else []
+            plan_card_block(plan, card, find_date_row(card.grid, card.layout, inp.entry_date), inp.trips, fills)
+        if daily is not None:
+            fills = inp.fills if hsd_block is daily else []
+            refills = inp.refills if log is None else []
+            row = find_date_row(daily.grid, daily.layout, inp.entry_date)
+            plan_daily_block(plan, daily, row, inp.total_trips, fills, refills)
+        if hm is not None:
             plan_hm_block(plan, hm, find_date_row(hm.grid, hm.layout, inp.entry_date), inp.opening, inp.closing)
-        if "log" in blocks:
-            plan_refill_log(plan, blocks["log"], inp.entry_date, inp.refills)
+        if log is not None:
+            plan_refill_log(plan, log, inp.entry_date, inp.refills)
         return plan
 
     def _report_trips(self, grid: SheetGrid, loader_number: int, entry_date: date, shared: bool) -> dict[str, int | None] | None:
@@ -408,7 +482,7 @@ class CardService:
         except (SheetsError, WorksheetResolutionError, SheetLayoutError, CardBlocked) as exc:
             return self._set(card_id, CardStatus.BLOCKED, exc.code, exc.message, **values)
 
-        values["sheet_row"] = plan.rows.get("card") or plan.rows.get("hm")
+        values["sheet_row"] = plan.rows.get("card") or plan.rows.get("daily") or plan.rows.get("hm")
         values["preview"] = {
             "cells": plan.cells,
             "rows": plan.rows,

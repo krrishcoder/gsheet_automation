@@ -11,6 +11,8 @@ Short form (every code is optional; send what you have)::
 * first line: loader and date (``L11 10-11``)
 * ``T1``-``T3`` trips, ``O1``-``O3`` opening HM, ``C1``-``C3`` closing HM of that shift
 * ``H <litres> <HM>``: a diesel refill and the hour meter at the refill (one ``H`` per refill)
+* ``T <trips>`` (no shift digit): the day's total trips, for a loader kept as one row per day
+  (``L08 10-11 H 120 5355.2 T 110``)
 
 The older long form still works (``CARD L11`` / ``Date: 06-11-2026`` / ``1st: 36`` /
 ``HSD: 190 + 154.98``), and both can be mixed. As with reports nothing is guessed: any number
@@ -59,8 +61,15 @@ _SHIFT_RE = re.compile(
     re.I,
 )
 _SHIFT_TOKENS = {"1st": 1, "first": 1, "2nd": 2, "second": 2, "3rd": 3, "third": 3}
-# T1 37 · O1 4268 · C1 4276.2 (T = trips, O = opening HM, C = closing HM; the digit is the shift)
-_CODE_RE = re.compile(r"(?<![a-z0-9])(?P<code>[toc])[ \t]*(?P<shift>[1-3])(?![\d.,])[ \t]*[:=\-]*[ \t]*(?P<val>\d[\d.,]*|nil+)?", re.I)
+# T1 37 · O1 4268 · C1 4276.2 (T = trips, O = opening HM, C = closing HM; the digit, written right
+# after the letter, is the shift)
+_CODE_RE = re.compile(r"(?<![a-z0-9])(?P<code>[toc])(?P<shift>[1-3])(?![\d.,])[ \t]*[:=\-]*[ \t]*(?P<val>\d[\d.,]*|nil+)?", re.I)
+# T 110 / Total 110 / Trips: 110 — the day's total trips. A space or ":" is needed after T, so "T137"
+# (a mistyped "T1 37") is reported instead of being read as 137 trips.
+_TOTAL_TRIPS_RE = re.compile(
+    r"(?<![a-z0-9])(?:total[ \t]*trips?|total|trips?|t)(?:[ \t]+|[ \t]*[:=\-]+[ \t]*)(?P<val>\d[\d.,]*|nil+)(?![\d])",
+    re.I,
+)
 # H 132.4 4276.2 (litres, then the hour meter at the refill)
 _REFILL_RE = re.compile(
     r"(?<![a-z0-9])h(?![a-z])[ \t]*[:=\-]*[ \t]*(?P<litres>\d[\d.,]*)?"
@@ -72,7 +81,7 @@ _HSD_RE = re.compile(r"(?<![a-z])(?:hsd|diesel|fuel)(?![a-z])(?:[ \t]*fuel)?(?P<
 _HSD_SPLIT_RE = re.compile(r"\+|&|(?<![a-z])and(?![a-z])|,[ \t]+", re.I)
 _HSD_UNIT_RE = re.compile(r"(?<=[\d\s])(?:ltrs?|litres?|liters?|l)\.?(?![a-z])", re.I)
 _NIL_RE = re.compile(r"^(?:nil+|null|none|na)$", re.I)
-_TOKENS_RE = (_SHIFT_RE, _CODE_RE, _REFILL_RE, _HSD_RE)
+_TOKENS_RE = (_SHIFT_RE, _CODE_RE, _TOTAL_TRIPS_RE, _REFILL_RE, _HSD_RE)
 _LABEL = {1: "1st", 2: "2nd", 3: "3rd"}
 
 
@@ -96,6 +105,7 @@ class ParsedCard:
     opening: dict[int, Decimal] = field(default_factory=dict)  # shift -> opening hour meter
     closing: dict[int, Decimal] = field(default_factory=dict)  # shift -> closing hour meter
     refills: list[Refill] = field(default_factory=list)
+    total_trips: int | None = None  # the day's trips, for a loader without shifts
 
     @property
     def hsd_fills(self) -> list[Decimal]:
@@ -116,6 +126,9 @@ class _Body:
 
     def take(self, start: int, end: int) -> None:
         self._read[start:end] = b"\x01" * (end - start)
+
+    def is_read(self, index: int) -> bool:
+        return bool(self._read[index])
 
     def unread_numbers(self) -> list[str]:
         rest = "".join(" " if self._read[i] else ch for i, ch in enumerate(self.text))
@@ -230,6 +243,23 @@ def _parse_codes(body: _Body, card: ParsedCard, errors: list[str]) -> None:
             errors.append(f"{code}{shift} ({name}): {exc}")
 
 
+def _parse_total_trips(body: _Body, card: ParsedCard, errors: list[str]) -> None:
+    for match in _TOTAL_TRIPS_RE.finditer(body.text):
+        if body.is_read(match.start()):
+            continue  # part of a shift line ("1st shift trips - 36")
+        body.take(match.start(), match.end())
+        if _NIL_RE.match(match["val"]):
+            continue
+        try:
+            value = parse_int(match["val"])
+        except ValueError as exc:
+            errors.append(f"T (total trips): {exc}")
+            continue
+        if card.total_trips is not None and card.total_trips != value:
+            errors.append(f"T (total trips) given twice ({card.total_trips} and {value})")
+        card.total_trips = value
+
+
 def _parse_refills(body: _Body, refills: list[Refill], errors: list[str]) -> None:
     for match in _REFILL_RE.finditer(body.text):
         body.take(match.start(), match.end())
@@ -291,9 +321,10 @@ def parse_card(raw_text: str, *, today: date) -> ParsedCard:
     _parse_hsd_lines(body, card.refills, errors)
     _parse_shift_lines(body, card.trips, errors)
     _parse_codes(body, card, errors)
+    _parse_total_trips(body, card, errors)
     _parse_refills(body, card.refills, errors)
     errors += [f"Could not read '{token}'" for token in _header_leftovers(header) + body.unread_numbers()]
-    if not errors and not (card.trips or card.opening or card.closing or card.refills):
+    if not errors and not (card.trips or card.opening or card.closing or card.refills or card.total_trips is not None):
         errors.append("Nothing to save — add e.g. 'T1 36', 'O1 4268', 'C1 4276.2' or 'H 132.4 4276.2'")
     if entry_date and entry_date > today:
         errors.append(f"Date {entry_date:%d-%m-%Y} is in the future")

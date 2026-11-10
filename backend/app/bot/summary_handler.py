@@ -61,9 +61,10 @@ def queue_summary(
     if not container.settings.summary_after_update:
         return
     chosen = summary_loaders(session)
-    loaders = [n for n in loaders if chosen is None or n in chosen]
-    if not loaders:
-        return  # the update was for loaders the boss summary does not cover
+    if chosen is not None:
+        if not chosen & set(loaders):
+            return  # the update was for loaders the boss summary does not cover
+        loaders = sorted(chosen)  # the boss gets all chosen loaders together (e.g. 08 and 11)
     enqueue(
         session,
         JobType.SEND_SUMMARY,

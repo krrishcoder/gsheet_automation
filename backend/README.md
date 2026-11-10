@@ -122,7 +122,7 @@ backend/
 │   ├── schemas/report.py, telegram.py, sheets.py
 │   └── core/config.py, security.py, logging.py
 ├── scripts/set_webhook.py          register / inspect / delete the webhook
-├── tests/                          257 tests, external APIs faked
+├── tests/                          270 tests, external APIs faked
 ├── deploy/Caddyfile                HTTPS reverse proxy (EC2)
 ├── Dockerfile, docker-compose.yml, .env.example, requirements*.txt
 ```
@@ -284,6 +284,23 @@ H 132.4 4276.2
 * The older long form (`CARD L11` / `Date: 06-11-2026` / `1st: 36` / `HSD: 190 + 154.98`) still
   works; its HSD line has no HM, so it only adds to HSD Fuel.
 
+**A loader kept as one row per day** (tab *Loader 8 nov 2026*, table *Loader 8*: Date, HSD, HM,
+Total TRIP, Per trip avg, AVG):
+
+```
+L08 10-11
+H 120 5355.2
+T 110
+```
+
+* `T 110` (a space after T, no shift digit) is the day's **Total TRIP**.
+* `H litres HM` adds the litres to the day's **HSD** (a sum when there are two refills), puts the
+  day's latest HM in **HM**, and writes **AVG** as `=HSD/(HM − previous day's HM)` (like the typed
+  `=C12/(D12-D11)`) if it is empty. A refill whose HM is not after the previous refill's is refused.
+* T1/T2/T3 for this loader, or `T` for a loader with shifts, get a short "use … instead" reply.
+* In the boss summary this loader shows trips, quantity (its "Quantity" column), the per-trip avg
+  (the month's HSD ÷ trips, and the latest day's "Per trip avg"), the latest AVG, and the two profits.
+
 ### Month summary for the boss (WhatsApp, one tap)
 
 After every sheet update (a confirmed report or card message) the bot sends the person who
@@ -311,8 +328,9 @@ Profit with GST: ₹139,201.66
   "Operating Profit (Pre-GST)" and "Profit With Gst" inside the loader's blocks. A figure a loader
   does not have (e.g. no refill log) is left out.
 * The summary covers the loaders the update wrote (a report: all of them; a card message: that
-  loader). `/summary_loaders 11` (admin) limits it to Loader 11: other loaders are left out, and an
-  update that only touches them sends no summary. `/summary_loaders` shows the choice,
+  loader). `/summary_loaders 8 11` (admin) fixes the list: every summary then shows Loaders 08 and
+  11 together, whichever of them was updated, and an update that only touches other loaders sends
+  no summary. `/summary_loaders` shows the choice,
   `/summary_loaders all` resets it.
 * `/boss_add <WhatsApp number> [name]` (admin) makes the button open that person's chat directly
   ("📲 Send to Sharma ji on WhatsApp", one button per number); without a number the button lets
@@ -499,7 +517,7 @@ Tables are created at startup (`create_all`).
 
 ## 11. Testing
 
-`pytest` runs 257 tests with fake Telegram and in-memory Google Sheets: parser variants (shifts,
+`pytest` runs 270 tests with fake Telegram and in-memory Google Sheets: parser variants (shifts,
 dates, Nil, PC, duplicates), totals validation, header detection (single/two-tier/merged/moved
 columns/not row 1), date-row matching (serials and text), column mapping, averages and totals,
 preservation of other cells and formulas, worksheet routing, authorisation per loader, corrections

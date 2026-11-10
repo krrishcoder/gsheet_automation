@@ -465,6 +465,27 @@ def _speed_key(label: str) -> str | None:
     return f"speed{shift}" if shift and _SPEED_RE.search(label) else None
 
 
+def _daily_key(label: str) -> str | None:
+    """A loader kept as one row per day (e.g. "Loader 8": Date, HSD, HM, Total TRIP, Per trip avg,
+    AVG). Per-shift columns mark a different kind of block."""
+    if _shift_of(label):
+        return "per_shift" if _TRIP_RE.search(label) or _WEIGHT_RE.search(label) else None
+    has_trip, has_avg = bool(_TRIP_RE.search(label)), bool(_AVG_RE.search(label))
+    if has_trip and has_avg:
+        return "trip_avg"  # litres per trip
+    if has_avg:
+        return "avg"  # litres per HM hour since the previous refill
+    if has_trip:
+        return "trips"
+    if _HM_RE.search(label):
+        return "hm"
+    if _FUEL_RE.search(label):
+        return "hsd"
+    if _WEIGHT_RE.search(label):
+        return "qty"
+    return None
+
+
 def _log_key(label: str) -> str | None:
     if _shift_of(label):
         return None
@@ -484,6 +505,7 @@ class BlockKind:
     required: tuple[str, ...]
     optional: tuple[str, ...]
     example: str  # how to title and head such a block ({n} = loader number)
+    forbidden: tuple[str, ...] = ()  # a column with this key means a different kind of block
 
 
 BLOCK_KINDS = {
@@ -508,6 +530,14 @@ BLOCK_KINDS = {
         ("hsd", "hm"),
         ("avg",),
         "'Loader {n} hsd avg' with the columns Date, hsd, hm, avg",
+    ),
+    "daily": BlockKind(
+        "daily table",
+        _daily_key,
+        ("hsd", "trips"),
+        ("hm", "avg", "qty", "trip_avg"),
+        "'Loader {n}' with the columns Date, HSD, HM, Total TRIP, AVG",
+        forbidden=("per_shift",),
     ),
     "speed": BlockKind(
         "speed block",
@@ -550,6 +580,8 @@ def detect_block_layout(grid: SheetGrid, kind: str, *, scan_rows: int = 20) -> t
             found.setdefault(key, []).append(col)
     columns: dict[str, int] = {}
     problems = []
+    if any(key in found for key in spec.forbidden):
+        raise SheetLayoutError("BLOCK_OTHER_KIND", f"not a {spec.name} (it has per-shift columns)")
     for key in spec.required + spec.optional:
         cols = found.get(key, [])
         if len(cols) == 1:

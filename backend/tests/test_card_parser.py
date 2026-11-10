@@ -110,3 +110,33 @@ def test_which_messages_are_card_messages():
     assert not is_card_message("*LOADER REPORT - CHP*\n*DATE*:- 06/11/2026\n*SHIFT*:- 1st Shift")
     assert not is_card_message("*LOADER - 01*\nTrip:- 42 Qty:-1340.840")
     assert not is_card_message("Loader 11\nTrip card 36")
+
+
+@pytest.mark.parametrize(
+    "text, total, refills",
+    [
+        ("L08 10-11\nH 120 5355.2\nT 110", 110, [("120", "5355.2")]),
+        ("L08 10-11 H 120 5355.2 T 110", 110, [("120", "5355.2")]),
+        ("L8 10-11 Total trips: 110", 110, []),
+        ("L08 10-11 Trips 110", 110, []),
+        ("L08 10-11 T 2", 2, []),  # a space after T: the day's total, not shift 2
+    ],
+)
+def test_day_total_trips(text, total, refills):
+    card = parse_card(text, today=TODAY)
+    assert card.loader_number == 8 and card.total_trips == total and card.trips == {}
+    assert card.refills == [Refill(Decimal(l), Decimal(hm)) for l, hm in refills]
+
+
+@pytest.mark.parametrize(
+    "text, error",
+    [
+        ("L08 10-11 T137", "Could not read 'T137'"),
+        ("L08 10-11 T 110 T 112", "T (total trips) given twice"),
+        ("L11 10-11 T 1 37", "Could not read '37'"),  # shift codes have no space: T1 37
+    ],
+)
+def test_day_total_errors(text, error):
+    with pytest.raises(CardParseError) as exc:
+        parse_card(text, today=TODAY)
+    assert any(error in e for e in exc.value.errors), exc.value.errors

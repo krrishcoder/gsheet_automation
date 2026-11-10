@@ -2,7 +2,9 @@
 
 Everything comes from the loader's month tab, as the sheet computes it:
 
-* trips and quantity: the month's shift values in the loader's shift table
+* trips and quantity: the month's shift values in the loader's shift table, or, for a loader kept
+  as one row per day ("Loader 8"), its Total TRIP and Quantity columns; such a loader also gets its
+  per-trip avg: the month's HSD ÷ trips, and the latest day's "Per trip avg"
 * diesel avg: the latest refill's avg in the refill log ("Loader 11 hsd avg"), in L per HM hour
 * speed: the latest shift's speed in the speed block ("Loader 11 Per trip Speed")
 * net operating profit / profit with GST: the values next to the labels "Operating Profit
@@ -51,11 +53,14 @@ class LoaderSummary:
     month: int
     till: date | None = None  # last day with shift data
     trips: int = 0
-    quantity: Decimal = Decimal(0)
+    quantity: Decimal | None = Decimal(0)  # None: the loader's table has no quantity column
     diesel_avg: str | None = None  # as the sheet shows it, e.g. "16.146"
     diesel_hm: str | None = None  # HM of that refill
     speed: str | None = None
     speed_at: tuple[date, int] | None = None  # (day, shift)
+    trip_avg_month: str | None = None  # litres per trip over the month (HSD ÷ trips)
+    trip_avg_latest: str | None = None  # the latest day's "Per trip avg"
+    trip_avg_day: date | None = None
     operating_profit: str | None = None
     profit_gst: str | None = None
     problems: list[str] = field(default_factory=list)
@@ -68,6 +73,11 @@ def _positive(cell: CellValue) -> bool:
 
 def _shown(cell: CellValue) -> str:
     return (cell.formatted or str(cell.effective)).strip()
+
+
+def _two_decimals(cell: CellValue) -> str:
+    """As the sheet's 0.00 format: 1.7963 -> "1.80"."""
+    return f"{Decimal(str(cell.effective)).quantize(Decimal('0.01'))}"
 
 
 def _three_decimals(cell: CellValue) -> str:
@@ -121,15 +131,61 @@ class SummaryService:
 
     def _fill(self, s: LoaderSummary, grid: SheetGrid, shared: bool) -> None:
         cfg = self.settings
-        table, layout, _ = locate_table(
-            grid,
-            s.loader_number,
-            cfg.sheet_column_map,
-            detection=cfg.sheet_header_detection,
-            strict=cfg.sheet_header_strict,
-            scan_rows=cfg.sheet_header_scan_rows,
-            require_title=shared,
-        )
+        try:
+            table, layout, _ = locate_table(
+                grid,
+                s.loader_number,
+                cfg.sheet_column_map,
+                detection=cfg.sheet_header_detection,
+                strict=cfg.sheet_header_strict,
+                scan_rows=cfg.sheet_header_scan_rows,
+                require_title=shared,
+            )
+        except SheetLayoutError:
+            daily = self._block(grid, s.loader_number, "daily")
+            if daily is None:
+                raise
+            self._fill_daily(s, daily)
+        else:
+            self._fill_shifts(s, table, layout)
+            self._diesel(s, grid)
+            self._speed(s, grid)
+        s.operating_profit = self._labelled(grid, s.loader_number, _OPERATING_PROFIT_RE)
+        s.profit_gst = self._labelled(grid, s.loader_number, _PROFIT_GST_RE)
+
+    def _fill_daily(self, s: LoaderSummary, block) -> None:
+        """One row per day: trips (and quantity) summed; diesel avg = the latest day's AVG."""
+        latest = None
+        hsd_total = Decimal(0)
+        for row, day in date_rows_summary(block.grid, block.layout):
+            if (day.year, day.month) != (s.year, s.month):
+                continue
+            hsd = block.grid.cell(row, block.columns["hsd"])
+            if _positive(hsd):
+                hsd_total += Decimal(str(hsd.effective))
+            if "trip_avg" in block.columns and _positive(block.grid.cell(row, block.columns["trip_avg"])):
+                s.trip_avg_latest = _two_decimals(block.grid.cell(row, block.columns["trip_avg"]))
+                s.trip_avg_day = day
+            trips = block.grid.cell(row, block.columns["trips"])
+            if _positive(trips):
+                s.till = day
+                s.trips += int(trips.effective)
+                if "qty" in block.columns:
+                    qty = block.grid.cell(row, block.columns["qty"])
+                    if _positive(qty):
+                        s.quantity += Decimal(str(qty.effective))
+            if "avg" in block.columns and _positive(block.grid.cell(row, block.columns["avg"])):
+                latest = row
+        if "qty" not in block.columns:
+            s.quantity = None
+        if s.trips:
+            s.trip_avg_month = f"{(hsd_total / s.trips).quantize(Decimal('0.01'))}"
+        if latest is not None:
+            s.diesel_avg = _three_decimals(block.grid.cell(latest, block.columns["avg"]))
+            hm = block.grid.cell(latest, block.columns["hm"]) if "hm" in block.columns else CellValue()
+            s.diesel_hm = None if hm.is_empty else _three_decimals(hm)
+
+    def _fill_shifts(self, s: LoaderSummary, table: SheetGrid, layout) -> None:
         for row, day in date_rows_summary(table, layout):
             if (day.year, day.month) != (s.year, s.month):
                 continue
@@ -143,10 +199,6 @@ class SummaryService:
                 s.till = day
                 s.trips += sum(v.trips or 0 for v in values)
                 s.quantity += sum((v.weight or Decimal(0) for v in values), Decimal(0))
-        self._diesel(s, grid)
-        self._speed(s, grid)
-        s.operating_profit = self._labelled(grid, s.loader_number, _OPERATING_PROFIT_RE)
-        s.profit_gst = self._labelled(grid, s.loader_number, _PROFIT_GST_RE)
 
     def _block(self, grid: SheetGrid, n: int, kind: str):
         try:
@@ -216,7 +268,11 @@ def render_summary(summaries: list[LoaderSummary], *, note: str | None = None) -
         till = f" (till {s.till:%d-%m})" if s.till else ""
         lines.append(f"*Loader {s.loader_number:02d}*{till}")
         lines.append(f"Trips: {s.trips:,}")
-        lines.append(f"Quantity: {s.quantity:,.2f} MT")
+        if s.quantity is not None:
+            lines.append(f"Quantity: {s.quantity:,.2f} MT")
+        if s.trip_avg_month:
+            latest = f", {s.trip_avg_latest} on {s.trip_avg_day:%d-%m}" if s.trip_avg_latest and s.trip_avg_day else ""
+            lines.append(f"Per trip avg: {s.trip_avg_month} L/trip (month){latest}")
         if s.diesel_avg:
             at = f" (last refill, HM {s.diesel_hm})" if s.diesel_hm else " (last refill)"
             lines.append(f"Diesel avg: {s.diesel_avg} L/h{at}")

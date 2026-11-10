@@ -366,3 +366,46 @@ def add_statement(ws: FakeWorksheet, *, top: int = 76, left: int = 4, operating_
     ws.set((top + 7, left + 5), 0.2425, formatted="24.25%", formula="=x")
     ws.set((top + 10, left + 4), "Profit With Gst")
     ws.set((top + 10, left + 5), profit_gst, formatted=money(profit_gst), formula="=x")
+
+
+def add_daily_table(
+    ws: FakeWorksheet, *, loader_number: int = 8, top: int = 2, left: int = 2, quantity_header: bool = False,
+    days: dict = None, year: int = 2026, month: int = 11,
+) -> dict[date, int]:
+    """Like the real "Loader 8" tab: one row per day — Date, HSD, HM, Total TRIP, (blank), Per trip
+    avg, quantity (=trips*30, headed only if ``quantity_header``), AVG (=HSD/(HM - previous HM)).
+    ``days`` = {date: (hsd, hm, trips)}; the financial block with the profits sits below."""
+    def at(offset: int, row: int) -> str:
+        return f"{column_letter(left + offset)}{row}"
+
+    ws.set(at(0, top), f"Loader {loader_number}")
+    for offset, header in ((0, "Date"), (1, "HSD"), (2, "HM"), (3, "Total TRIP "), (5, "Per trip avg"), (7, "AVG")):
+        ws.set(at(offset, top + 1), header)
+    if quantity_header:
+        ws.set(at(6, top + 1), "Quantity (MT)")
+    rows: dict[date, int] = {}
+    d, row, previous_hm_row = date(year, month, 1), top + 2, None
+    while d.month == month:
+        ws.set(at(0, row), serial(d), formatted=d.strftime("%d-%m-%Y"))
+        hsd, hm, trips = (days or {}).get(d, (None, None, None))
+        if hsd is not None:
+            ws.set(at(1, row), hsd)
+        if trips is not None:
+            ws.set(at(3, row), trips)
+            ws.set(at(6, row), trips * 30, formula=f"={at(3, row)}*30")
+            if hsd is not None:
+                ws.set(at(5, row), hsd / trips, formula=f'=IFERROR({at(1, row)}/{at(3, row)}, "")')
+        if hm is not None:
+            ws.set(at(2, row), hm)
+            if previous_hm_row is not None:
+                formula = f"={at(1, row)}/({at(2, row)}-{at(2, previous_hm_row)})"
+                ws.set(at(7, row), _evaluate(ws, formula), formula=formula)
+            previous_hm_row = row
+        rows[d] = row
+        d += timedelta(days=1)
+        row += 1
+    ws.set(at(3, row + 8), "Operating Profit")
+    ws.set(at(4, row + 8), 72347.06, formatted="₹72,347.06", formula="=x")
+    ws.set(at(3, row + 10), "Profit with gst")
+    ws.set(at(4, row + 10), 118842.41, formatted="₹118,842.41", formula="=x")
+    return rows
