@@ -330,6 +330,41 @@ def find_tables(grid: SheetGrid) -> list[TableRegion]:
     return tables
 
 
+def _shifted_config(table: TableRegion, configured: dict[str, str]) -> dict[str, str]:
+    """Configured letters describe a table whose Date column is the configured DATE column;
+    shift them so the fallback mapping also fits tables placed further right."""
+    offset = table.date_col - column_index(configured["DATE"])
+    shifted = {key: column_letter(column_index(letter) + offset) for key, letter in configured.items()}
+    if min(column_index(letter) for letter in shifted.values()) < 1:
+        return dict(configured)
+    return shifted
+
+
+def _region(grid: SheetGrid, table: TableRegion) -> SheetGrid:
+    return grid.subgrid(table.first_row, table.last_row, table.first_col, table.last_col)
+
+
+def find_report_tables(
+    grid: SheetGrid, configured: dict[str, str], *, scan_rows: int = 20
+) -> tuple[list[TableRegion], list[TableRegion]]:
+    """(shift-report tables, ignored tables).
+
+    A summary block with its own "Date" column (e.g. "Loader 11 Card Details": Date, Fuel, trips
+    per shift) is not a shift report and must neither be written nor make a loader ambiguous.
+    A table counts when its headers name every shift's Trips/Weight/Avg and the day totals. If no
+    table qualifies, all of them are returned, so the usual header errors are still reported.
+    """
+    tables = find_tables(grid)
+    report, ignored = [], []
+    for table in tables:
+        try:
+            detect_layout(_region(grid, table), _shifted_config(table, configured), scan_rows=scan_rows)
+            report.append(table)
+        except SheetLayoutError:
+            ignored.append(table)
+    return (report, ignored) if report else (tables, [])
+
+
 def locate_table(
     grid: SheetGrid,
     loader_number: int,
@@ -347,8 +382,15 @@ def locate_table(
       title does not name this loader.
     * Several tables: exactly one must be titled for this loader. Callers must use the returned
       subgrid for row matching, so another loader's rows can never be matched or written.
+
+    Only shift-report tables count (see ``find_report_tables``); summary blocks are ignored.
     """
-    tables = find_tables(grid)
+    tables, ignored = find_report_tables(grid, configured, scan_rows=scan_rows)
+    unrecognised = "".join(
+        f". {t.describe()} is titled for it, but its headers are not a shift report (1st/2nd/3rd Shift Trips, Weight, Avg, Day Total)"
+        for t in ignored
+        if t.loader_number == loader_number
+    )
     if len(tables) <= 1:
         table = tables[0] if tables else None
         if table and table.loader_number not in (None, loader_number):
@@ -360,34 +402,30 @@ def locate_table(
             raise SheetLayoutError(
                 "TABLE_NOT_FOUND",
                 f"'{grid.title}' has no table titled 'Loader {loader_number:02d}'. "
-                f"Put a title such as 'Loader {loader_number:02d} – <month>' above its header row",
+                f"Put a title such as 'Loader {loader_number:02d} – <month>' above its header row{unrecognised}",
             )
-        layout = detect_layout(grid, configured, detection=detection, strict=strict, scan_rows=scan_rows)
-        return grid, layout, table
-
-    matches = [t for t in tables if t.loader_number == loader_number]
-    if len(matches) != 1:
-        titles = ", ".join(f"'{t.title}'" for t in tables if t.title) or "none"
-        if matches:
+        if not ignored:
+            layout = detect_layout(grid, configured, detection=detection, strict=strict, scan_rows=scan_rows)
+            return grid, layout, table
+        # summary blocks share the tab: work only inside the report table
+    else:
+        matches = [t for t in tables if t.loader_number == loader_number]
+        if len(matches) != 1:
+            titles = ", ".join(f"'{t.title}'" for t in tables if t.title) or "none"
+            if matches:
+                raise SheetLayoutError(
+                    "TABLE_AMBIGUOUS",
+                    f"'{grid.title}' has {len(matches)} tables titled for Loader {loader_number:02d}: "
+                    + "; ".join(t.describe() for t in matches),
+                )
             raise SheetLayoutError(
-                "TABLE_AMBIGUOUS",
-                f"'{grid.title}' has {len(matches)} tables titled for Loader {loader_number:02d}: "
-                + "; ".join(t.describe() for t in matches),
+                "TABLE_NOT_FOUND",
+                f"'{grid.title}' has {len(tables)} tables but none titled 'Loader {loader_number:02d}' "
+                f"(titles found: {titles}). Put a title such as 'Loader {loader_number:02d} – <month>' above its header row{unrecognised}",
             )
-        raise SheetLayoutError(
-            "TABLE_NOT_FOUND",
-            f"'{grid.title}' has {len(tables)} tables but none titled 'Loader {loader_number:02d}' "
-            f"(titles found: {titles}). Put a title such as 'Loader {loader_number:02d} – <month>' above its header row",
-        )
-    table = matches[0]
-    sub = grid.subgrid(table.first_row, table.last_row, table.first_col, table.last_col)
-    # Configured letters describe a table whose Date column is the configured DATE column;
-    # shift them so the fallback mapping also fits tables placed further right.
-    offset = table.date_col - column_index(configured["DATE"])
-    shifted = {key: column_letter(column_index(letter) + offset) for key, letter in configured.items()}
-    if min(column_index(letter) for letter in shifted.values()) < 1:
-        shifted = dict(configured)
-    layout = detect_layout(sub, shifted, detection=detection, strict=strict, scan_rows=scan_rows)
+        table = matches[0]
+    sub = _region(grid, table)
+    layout = detect_layout(sub, _shifted_config(table, configured), detection=detection, strict=strict, scan_rows=scan_rows)
     return sub, layout, table
 
 

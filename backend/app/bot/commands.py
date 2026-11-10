@@ -22,7 +22,14 @@ from app.database.repositories import (
 from app.schemas.telegram import TgMessage
 from app.services.google_sheets_service import SheetsError
 from app.services.loader_service import ConfigurationError, LoaderService, extract_spreadsheet_id, parse_loader_number
-from app.services.sheet_layout import Col, SheetLayoutError, column_letter, date_rows_summary, find_tables, locate_table
+from app.services.sheet_layout import (
+    Col,
+    SheetLayoutError,
+    column_letter,
+    date_rows_summary,
+    find_report_tables,
+    locate_table,
+)
 from app.services.worksheet_service import (
     MONTH_NAMES,
     WorksheetResolutionError,
@@ -473,9 +480,13 @@ def cmd_check_sheet(ctx: CommandContext) -> str:
     except (SheetsError, WorksheetResolutionError, SheetLayoutError) as exc:
         lines.append(f"❌ {h(exc.message)}")
         return "\n".join(lines)
-    tables = find_tables(tab)
+    tables, ignored = find_report_tables(tab, settings.sheet_column_map, scan_rows=settings.sheet_header_scan_rows)
     if len(tables) > 1 and table is not None:
         lines.append(f"Table: {h(table.describe())} (1 of {len(tables)} tables in this tab)")
+    elif ignored and table is not None:
+        lines.append(f"Table: {h(table.describe())}")
+    if ignored:
+        lines.append("Ignored (not a shift table): " + "; ".join(h(t.describe()) for t in ignored))
     lines.append(f"Header row(s): {', '.join(map(str, layout.header_rows))} · data from row {layout.data_start_row}")
     lines.append(
         "Columns: " + ", ".join(f"{c.value}={column_letter(layout.columns[c])}" for c in Col if c in layout.columns)

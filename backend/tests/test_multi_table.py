@@ -13,12 +13,13 @@ from app.services.sheet_layout import (
     column_index,
     column_letter,
     find_date_row,
+    find_report_tables,
     find_tables,
     locate_table,
 )
 from app.services.worksheet_service import resolve_worksheet
 from tests.conftest import ADMIN_ID, REPORT_DATE, SAMPLE_REPORT
-from tests.fakes import FakeSheets, FakeWorksheet, add_month_table
+from tests.fakes import FakeSheets, FakeWorksheet, add_month_table, serial
 
 SHARED_ID = "combined-loaders-abcdefghijklmnop"
 SHARED_URL = f"https://docs.google.com/spreadsheets/d/{SHARED_ID}/edit"
@@ -39,6 +40,27 @@ def combined_tab(arrangement: str, *, untitled: tuple[int, ...] = (), title: str
         rows = add_month_table(ws, 2026, 11, top=top, left=left, loader_number=n, title=None if n in untitled else "default")
         tables[n] = (left, rows)
     return ws, tables
+
+
+def add_card_details(ws, *, top: int, left: int = 4, loader_number: int = 11) -> dict[date, int]:
+    """A summary block like the real sheet's "Loader 11 Card Details": its own Date column and a
+    trip count per shift, but no per-shift weight/avg, so it is not a shift report."""
+    ws.set(f"{column_letter(left)}{top}", f"Loader {loader_number:02d} Card Details")
+    headers = ["Date", "HSD Fuel (L)", "1st Shift Trips", "2nd Shift Trips", "3rd Shift Trips", "Total Trips", "Est. Weight (MT)"]
+    for offset, header in enumerate(headers):
+        ws.set(f"{column_letter(left + offset)}{top + 1}", header)
+    rows = {}
+    for day in range(1, 31):
+        d, row = date(2026, 11, day), top + 1 + day
+        ws.set(f"{column_letter(left)}{row}", serial(d), formatted=d.strftime("%d-%m-%Y"))
+        for offset, value in ((2, 11), (3, 33), (4, 14), (5, 58), (6, 1960)):
+            ws.set(f"{column_letter(left + offset)}{row}", value)
+        rows[d] = row
+    return rows
+
+
+def card_values(ws, left, row):
+    return tuple(ws.value(f"{column_letter(left + k)}{row}") for k in range(2, 7))
 
 
 def grid_of(ws):
@@ -113,6 +135,41 @@ def test_single_table_titled_for_another_loader_is_refused():
     assert locate_table(grid_of(untitled), 1, DEFAULT_COLUMN_MAP)[2].loader_number is None  # untitled: still fine
 
 
+def test_summary_block_titled_for_a_loader_is_ignored():
+    ws, tables = combined_tab("side")
+    card_rows = add_card_details(ws, top=41)  # under the tables, spanning Loader 11's columns and more
+    grid = grid_of(ws)
+    report, ignored = find_report_tables(grid, DEFAULT_COLUMN_MAP)
+    assert {t.loader_number for t in report} == set(LOADERS)
+    assert [t.title for t in ignored] == ["Loader 11 Card Details"]
+    for n, (left, rows) in tables.items():
+        table, layout, region = locate_table(grid, n, DEFAULT_COLUMN_MAP, require_title=True)
+        assert region.title == f"Loader {n:02d} – November 2026"
+        assert layout.col(Col.DATE) == left
+        assert find_date_row(table, layout, REPORT_DATE) == rows[REPORT_DATE] != card_rows[REPORT_DATE]
+
+
+def test_summary_block_above_an_untitled_table_in_a_loader_tab():
+    ws = FakeWorksheet("Loader 11 nov 2026")
+    add_card_details(ws, top=1, left=2)  # above the report table and titled for Loader 11
+    rows = add_month_table(ws, 2026, 11, top=40, loader_number=11, title=None)
+    table, layout, region = locate_table(grid_of(ws), 11, DEFAULT_COLUMN_MAP)
+    assert region.title is None and layout.col(Col.SHIFT_1_TRIPS) == column_index("D")
+    assert find_date_row(table, layout, REPORT_DATE) == rows[REPORT_DATE]
+
+
+def test_loaders_own_table_with_broken_headers_is_named_in_the_error():
+    ws, tables = combined_tab("side")
+    left5 = tables[5][0]
+    ws.set(f"{column_letter(left5 + 3)}3", "Remarks")  # 1st-shift "Weight (MT)" overwritten
+    grid = grid_of(ws)
+    with pytest.raises(SheetLayoutError) as exc:
+        locate_table(grid, 5, DEFAULT_COLUMN_MAP)
+    assert exc.value.code == "TABLE_NOT_FOUND"
+    assert "'Loader 05 – November 2026' (rows" in exc.value.message and "not a shift report" in exc.value.message
+    assert locate_table(grid, 1, DEFAULT_COLUMN_MAP)[2].loader_number == 1  # the others still work
+
+
 def test_loader_tab_is_preferred_over_a_shared_month_tab():
     titles = ["Loader 11 nov 2026", "Nov 2026"]
     kw = dict(year=2026, month=11, configured_name=None, available_titles=titles, auto_detect=True)
@@ -149,6 +206,23 @@ def test_report_writes_each_loader_into_its_own_table(bot, container, arrangemen
                 col = "".join(ch for ch in ref if ch.isalpha())
                 assert left <= column_index(col) <= left + 12, (record.loader_number, ref)
                 assert int(ref[len(col):]) == rows[REPORT_DATE]
+
+
+def test_report_with_a_card_details_block_in_the_tab(bot, container):
+    ws, tables = setup(container, "side")
+    card_rows = add_card_details(ws, top=41)
+    bot.send(f"/set_sheet 1 5 11 {SHARED_URL}", user_id=ADMIN_ID)
+    summary = bot.send(SAMPLE_REPORT, user_id=ADMIN_ID)
+    assert "Card Details" not in summary["text"]
+    result = bot.confirm(summary, user_id=ADMIN_ID)
+    assert result["text"].startswith("✅ SUCCESS")
+    for n, (left, rows) in tables.items():
+        assert cells(ws, left, rows[REPORT_DATE]) == EXPECTED[n]
+    assert card_values(ws, 4, card_rows[REPORT_DATE]) == (11, 33, 14, 58, 1960)  # summary untouched
+
+    text = bot.send("/check_sheet 11 2026 11", user_id=ADMIN_ID)["text"]
+    assert "(1 of 3 tables in this tab)" in text
+    assert "Ignored (not a shift table): 'Loader 11 Card Details'" in text
 
 
 def test_untitled_table_in_a_shared_tab_is_not_written(bot, container):

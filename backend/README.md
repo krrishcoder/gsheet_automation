@@ -122,7 +122,7 @@ backend/
 │   ├── schemas/report.py, telegram.py, sheets.py
 │   └── core/config.py, security.py, logging.py
 ├── scripts/set_webhook.py          register / inspect / delete the webhook
-├── tests/                          189 tests, external APIs faked
+├── tests/                          194 tests, external APIs faked
 ├── deploy/Caddyfile                HTTPS reverse proxy (EC2)
 ├── Dockerfile, docker-compose.yml, .env.example, requirements*.txt
 ```
@@ -236,7 +236,12 @@ summary says so.
   without a titled table in a shared tab is blocked ("none titled 'Loader 05'"), and so is a title used
   twice. A tab with a single table still works without a title, unless the title names a different
   loader (e.g. a tab copied from another loader).
-* `/check_sheet 5 2026 11` shows which table was picked (title, rows, columns) and its columns.
+* Other blocks in the tab that have their own *Date* column but are not shift reports (e.g.
+  *Loader 11 Card Details*: Date, fuel, trips per shift, no per-shift weight/avg) are **ignored**, even
+  when their title names a loader. A table counts only if its headers have Trips, Weight and Avg for
+  all three shifts plus the Day Total columns.
+* `/check_sheet 5 2026 11` shows which table was picked (title, rows, columns), its columns, and any
+  ignored blocks.
 * The bot always reads the whole tab, however far right or down the tables go. (Older versions had
   `SHEET_READ_MAX_ROWS` / `SHEET_READ_LAST_COLUMN`; they are no longer used and are ignored if still set.)
 
@@ -415,7 +420,7 @@ Tables are created at startup (`create_all`).
 
 ## 11. Testing
 
-`pytest` runs 189 tests with fake Telegram and in-memory Google Sheets: parser variants (shifts,
+`pytest` runs 194 tests with fake Telegram and in-memory Google Sheets: parser variants (shifts,
 dates, Nil, PC, duplicates), totals validation, header detection (single/two-tier/merged/moved
 columns/not row 1), date-row matching (serials and text), column mapping, averages and totals,
 preservation of other cells and formulas, worksheet routing, authorisation per loader, corrections
