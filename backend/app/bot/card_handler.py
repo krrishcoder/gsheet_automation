@@ -1,4 +1,4 @@
-"""Typed trip-card / HSD messages: parse -> preview against the card block -> Confirm -> write."""
+"""Card messages (trips, hour meter, diesel refills): parse -> preview -> Confirm -> write."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ from app.bot.formatting import fmt_date, h, loader_label
 from app.container import AppContainer
 from app.database.models import CardEntry, CardStatus, UpdateStatus, User, utcnow
 from app.database.repositories import CardRepository, audit
-from app.schemas.report import SHIFT_LABELS
 from app.schemas.telegram import TgCallbackQuery, TgMessage
 from app.services.card_parser import CARD_FORMAT, CardParseError, parse_card
 from app.services.card_service import fmt_dec
@@ -20,16 +19,18 @@ from app.worker.job_queue import JobType, enqueue
 log = logging.getLogger(__name__)
 
 CARD_FORMAT_HELP = (
-    "<b>Trip card / HSD message</b>\n"
+    "<b>Card message</b> (trips, hour meter, diesel)\n"
     f"<code>{h(CARD_FORMAT)}</code>\n\n"
-    "• Send only what you have: one shift, two shifts, all three, or only HSD. Each line is saved "
-    "in its own cell; the other cells are left as they are.\n"
-    "• One line works too: <code>CARD L11 06-11 3rd 44 HSD 154.98</code>\n"
-    "• HSD: each tanker fill in litres. A fill already saved for that day is not added twice, so "
-    "you can send the full day again (<code>HSD: 190 + 154.98</code>). Two fills of exactly the "
-    "same litres? Send them together: <code>HSD: 150 + 150</code>.\n"
-    "• Trips for a shift that is already filled are replaced (shown before you confirm).\n"
-    "• To fix a wrong HSD fill, edit the cell in the sheet."
+    "<code>L11 10-11</code> first line: loader and date\n"
+    "<code>T1</code> <code>T2</code> <code>T3</code> trips of the 1st / 2nd / 3rd shift → Card Details\n"
+    "<code>O1</code> … <code>O3</code> opening HM, <code>C1</code> … <code>C3</code> closing HM → Opening and Closing\n"
+    "<code>H 132.4 4276.2</code> diesel refill: litres, then the HM at the refill → hsd avg (new row, date "
+    "filled in) and HSD Fuel in Card Details. One <code>H</code> per refill.\n\n"
+    "• Send only what you have, e.g. <code>L11 10-11 C3 4291.5</code>; other cells are left as they are.\n"
+    "• A value already in the sheet is replaced only after you see it in the preview and confirm.\n"
+    "• A refill sent again (same litres and HM) is not added twice.\n"
+    "• Refused: closing HM below opening, a refill HM lower than the last refill's. "
+    "Warned: a shift over 8 h, an opening HM that differs from the previous closing."
 )
 
 
@@ -38,6 +39,9 @@ def card_keyboard(card_id: int) -> dict:
 
 
 # --- Rendering ------------------------------------------------------------------------------------
+
+_SHIFT = {1: "1st", 2: "2nd", 3: "3rd"}
+_AFTER_CONFIRM = (CardStatus.QUEUED, CardStatus.APPLYING, CardStatus.UPDATED)
 
 
 def _litres(fills: list[str] | None) -> str:
@@ -49,6 +53,12 @@ def _litres(fills: list[str] | None) -> str:
     return f"{' + '.join(fills)} = {total} L" if len(fills) > 1 else f"{total} L"
 
 
+def _state(cell: dict) -> str:
+    if cell["before"] == cell["after"]:
+        return "already in sheet"
+    return "new" if cell["before"] is None else f"⚠️ replaces {cell['before']}"
+
+
 def _chp(card_trips: int, report_trips: dict | None, shift: int) -> str:
     chp = (report_trips or {}).get(str(shift))
     if chp is None:
@@ -58,48 +68,62 @@ def _chp(card_trips: int, report_trips: dict | None, shift: int) -> str:
     return f" · CHP report {chp} (card {card_trips - chp:+d})"
 
 
-def _lines(card: CardEntry) -> list[str]:
+def _sections(card: CardEntry) -> list[str]:
+    """Preview lines per block, in the order of the sheet (plain text; escaped by the caller)."""
     preview = card.preview or {}
     cells = preview.get("cells") or {}
-    lines = []
-    for ref, cell in cells.items():
-        if cell["kind"] == "trips":
-            shift, after, before = cell["shift"], cell["after"], cell["before"]
-            if before == after:
-                state = "already in sheet"
-            elif before is None:
-                state = "new"
+    blocks, rows = preview.get("blocks") or {}, preview.get("rows") or {}
+    by_kind = lambda kind: [(ref, c) for ref, c in cells.items() if c["kind"] == kind]  # noqa: E731
+    out: list[str] = []
+
+    trips = by_kind("trips")
+    if trips:
+        out.append(f"Trips — {blocks.get('card', 'card block')}, row {rows.get('card')}")
+        for ref, c in trips:
+            out.append(f"• {_SHIFT[c['shift']]}: {c['after']} ({ref}, {_state(c)}){_chp(c['after'], preview.get('report_trips'), c['shift'])}")
+
+    readings = by_kind("hm")
+    if readings:
+        out.append(f"Hour meter — {blocks.get('hm', 'HM block')}, row {rows.get('hm')}")
+        for shift in (1, 2, 3):
+            parts = [
+                f"{'opening' if c['key'].startswith('open') else 'closing'} {c['after']} ({ref}, {_state(c)})"
+                for ref, c in readings
+                if c["shift"] == shift
+            ]
+            if parts:
+                hours = ((preview.get("hours") or {}).get(str(shift)) or {}).get("hours")
+                out.append(f"• {_SHIFT[shift]}: " + " · ".join(parts) + (f" → {hours} h" if hours is not None else ""))
+
+    refills = preview.get("refills") or []
+    if refills:
+        out.append(f"Diesel refills — {blocks.get('log', 'refill log')}")
+        for r in refills:
+            if r["state"] == "already":
+                out.append(f"• {r['litres']} L at HM {r['hm']}: already logged")
             else:
-                state = f"⚠️ replaces {before}"
-            lines.append(f"{SHIFT_LABELS[shift]}: {after} trips ({ref}, {state}){_chp(after, preview.get('report_trips'), shift)}")
-    for ref, cell in cells.items():
-        if cell["kind"] == "hsd":
-            parts = []
-            if cell["added"]:
-                parts.append("adding " + " + ".join(cell["added"]))
-            if cell["already"]:
-                parts.append(" + ".join(cell["already"]) + " already saved")
-            result = _litres(cell["existing"] + cell["added"])
-            lines.append(f"HSD ({ref}): {', '.join(parts)} → {result}")
-    return lines
+                avg = f" · avg {r['avg']} L/h" if r.get("avg") else " · avg: no earlier refill to compare"
+                out.append(f"• {r['litres']} L at HM {r['hm']} → new row {r['row']}{avg}")
 
-
-_AFTER_CONFIRM = (CardStatus.QUEUED, CardStatus.APPLYING, CardStatus.UPDATED)
+    for ref, c in by_kind("hsd"):
+        parts = []
+        if c["added"]:
+            parts.append("adding " + " + ".join(c["added"]))
+        if c["already"]:
+            parts.append(" + ".join(c["already"]) + " already in it")
+        out.append(f"HSD Fuel ({ref}): {', '.join(parts)} → {_litres(c['existing'] + c['added'])}")
+    return out
 
 
 def render_card_summary(card: CardEntry, *, ttl_minutes: int, footer: str | None = None) -> str:
-    head = f"🗂 <b>Trip card received</b> (#{card.id})\n{loader_label(card.loader_number)} · {fmt_date(card.entry_date)}"
-    preview = card.preview or {}
-    if card.worksheet_name and card.sheet_row:
-        table = f"'{h(preview['table'])}' in " if preview.get("table") else ""
-        head += f" → {table}'{h(card.worksheet_name)}' · row {card.sheet_row}"
+    head = f"🗂 <b>{loader_label(card.loader_number)} · {fmt_date(card.entry_date)}</b> (#{card.id})"
+    if card.worksheet_name:
+        head += f" · '{h(card.worksheet_name)}'"
     out = [head, ""]
-    out += [h(line) for line in _lines(card)]
-    day = preview.get("day")
-    if day and card.status in (CardStatus.PENDING_CONFIRMATION, *_AFTER_CONFIRM):
-        shifts = " · ".join(f"{label} {'–' if day.get(str(n)) is None else day[str(n)]}" for n, label in ((1, "1st"), (2, "2nd"), (3, "3rd")))
-        hsd = f" · HSD {_litres(day.get('hsd'))}" if "hsd" in day else ""
-        out += ["", f"Day after saving: {h(shifts + hsd)}"]
+    out += [h(line) for line in _sections(card)]
+    warnings = (card.preview or {}).get("warnings") or []
+    if warnings and card.status in (CardStatus.PENDING_CONFIRMATION, *_AFTER_CONFIRM):
+        out += [""] + [f"⚠️ {h(w)}" for w in warnings]
     out.append("")
     if footer:
         out.append(footer)
@@ -113,19 +137,27 @@ def render_card_summary(card: CardEntry, *, ttl_minutes: int, footer: str | None
 
 
 def render_card_result(card: CardEntry) -> str:
-    where = f"{loader_label(card.loader_number)} · {fmt_date(card.entry_date)} · '{h(card.worksheet_name)}' row {card.sheet_row}"
-    if card.status == CardStatus.UPDATED:
-        lines = [f"✅ <b>Saved</b> trip card #{card.id}", where]
-        for ref, cell in ((card.preview or {}).get("cells") or {}).items():
-            if cell["before"] == cell["after"]:
-                continue
-            if cell["kind"] == "trips":
-                lines.append(f"• {SHIFT_LABELS[cell['shift']]}: {cell['after']} trips ({ref})")
-            else:
-                lines.append(f"• HSD: {h(_litres(cell['existing'] + cell['added']))} ({ref})")
-        return "\n".join(lines)
-    icon = "⚠️" if card.status == CardStatus.CONFLICT else "❌"
-    return f"{icon} <b>Trip card #{card.id} not saved</b>\n{where}\n{h(card.error_message or card.status.value)}"
+    where = f"{loader_label(card.loader_number)} · {fmt_date(card.entry_date)} · '{h(card.worksheet_name)}'"
+    if card.status != CardStatus.UPDATED:
+        icon = "⚠️" if card.status == CardStatus.CONFLICT else "❌"
+        return f"{icon} <b>Card #{card.id} not saved</b>\n{where}\n{h(card.error_message or card.status.value)}"
+    preview = card.preview or {}
+    lines = [f"✅ <b>Saved</b> card #{card.id}", where]
+    for ref, c in (preview.get("cells") or {}).items():
+        if c["before"] == c["after"]:
+            continue
+        if c["kind"] == "trips":
+            lines.append(f"• {_SHIFT[c['shift']]} shift trips {c['after']} ({ref})")
+        elif c["kind"] == "hm":
+            what = "opening" if c["key"].startswith("open") else "closing"
+            lines.append(f"• {_SHIFT[c['shift']]} shift {what} HM {c['after']} ({ref})")
+        elif c["kind"] == "hsd":
+            lines.append(f"• HSD Fuel {h(_litres(c['existing'] + c['added']))} ({ref})")
+    for r in preview.get("refills") or []:
+        if r["state"] == "new":
+            avg = f", avg {r['avg']} L/h" if r.get("avg") else ""
+            lines.append(f"• Refill {r['litres']} L at HM {r['hm']} → row {r['row']}{avg}")
+    return "\n".join(lines)
 
 
 # --- Message ------------------------------------------------------------------------------------
@@ -166,7 +198,7 @@ def handle_card_message(container: AppContainer, update_id: int, message: TgMess
             errors = "\n".join(f"• {h(e)}" for e in exc.errors)
             telegram.send_message(
                 chat.id,
-                f"⚠️ Could not read this trip card:\n{errors}\n\n{CARD_FORMAT_HELP}",
+                f"⚠️ Could not read this card message:\n{errors}\n\n{CARD_FORMAT_HELP}",
                 reply_to_message_id=message.message_id,
             )
             return UpdateStatus.PROCESSED
@@ -176,6 +208,9 @@ def handle_card_message(container: AppContainer, update_id: int, message: TgMess
                 entry_date=parsed.entry_date,
                 trips={str(k): v for k, v in parsed.trips.items()},
                 hsd_fills=[str(f) for f in parsed.hsd_fills],
+                hm_readings={f"o{k}": str(v) for k, v in parsed.opening.items()}
+                | {f"c{k}": str(v) for k, v in parsed.closing.items()},
+                refills=[{"litres": str(r.litres), "hm": None if r.hm is None else str(r.hm)} for r in parsed.refills],
                 telegram_user_id=user.telegram_user_id,
                 chat_id=chat.id,
                 source_message_id=message.message_id,
@@ -194,7 +229,8 @@ def handle_card_message(container: AppContainer, update_id: int, message: TgMess
                 loader_number=parsed.loader_number,
                 date=parsed.entry_date,
                 trips=card.trips,
-                hsd=card.hsd_fills,
+                hm=card.hm_readings,
+                refills=card.refills,
             )
 
     container.cards.preview(card_id)
@@ -232,7 +268,7 @@ def confirm_card(container: AppContainer, query: TgCallbackQuery, user: User, ca
         repo = CardRepository(session)
         card = repo.get(card_id)
         if card is None:
-            telegram.answer_callback_query(query.id, "Trip card not found.")
+            telegram.answer_callback_query(query.id, "Card entry not found.")
             return
         if card.telegram_user_id != user.telegram_user_id and not container.auth.is_admin(user):
             telegram.answer_callback_query(query.id, "Only the person who sent this (or an admin) can confirm it.", show_alert=True)
@@ -268,7 +304,7 @@ def cancel_card(container: AppContainer, query: TgCallbackQuery, user: User, car
         repo = CardRepository(session)
         card = repo.get(card_id)
         if card is None:
-            telegram.answer_callback_query(query.id, "Trip card not found.")
+            telegram.answer_callback_query(query.id, "Card entry not found.")
             return
         if card.telegram_user_id != user.telegram_user_id and not container.auth.is_admin(user):
             telegram.answer_callback_query(query.id, "Only the sender or an admin can cancel this.", show_alert=True)

@@ -251,3 +251,43 @@ class GoogleSheetsClient:
             json=body,
             description="values.batchUpdate",
         )
+        dated = [w for w in writes if w.date_format]
+        if dated:
+            # A bare serial would show as 46336, and typed text is read with the file's locale
+            # (en_US: 08/11 = 11 Aug). A real date with an explicit pattern avoids both.
+            sheet_id = self._sheet_id(spreadsheet_id, worksheet)
+            requests = [
+                {
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": w.row - 1,
+                            "endRowIndex": w.row,
+                            "startColumnIndex": w.col - 1,
+                            "endColumnIndex": w.col,
+                        },
+                        "cell": {"userEnteredFormat": {"numberFormat": {"type": "DATE", "pattern": w.date_format}}},
+                        "fields": "userEnteredFormat.numberFormat",
+                    }
+                }
+                for w in dated
+            ]
+            self._request(
+                "POST",
+                f"{API_BASE}/{spreadsheet_id}:batchUpdate",
+                json={"requests": requests},
+                description="spreadsheets.batchUpdate(date format)",
+            )
+
+    def _sheet_id(self, spreadsheet_id: str, worksheet: str) -> int:
+        payload = self._request(
+            "GET",
+            f"{API_BASE}/{spreadsheet_id}",
+            params={"fields": "sheets.properties(sheetId,title)"},
+            description="spreadsheets.get(sheet ids)",
+        )
+        for sheet in payload.get("sheets", []):
+            props = sheet.get("properties", {})
+            if props.get("title") == worksheet:
+                return int(props.get("sheetId", 0))  # the first tab's id 0 is omitted from the JSON
+        raise SheetsError("WORKSHEET_NOT_FOUND", f"Worksheet not found ({worksheet})")

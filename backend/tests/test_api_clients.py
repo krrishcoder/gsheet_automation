@@ -161,3 +161,20 @@ def test_telegram_client_raises_on_permanent_error():
     with pytest.raises(TelegramApiError) as exc:
         api.send_message(5, "hi")
     assert exc.value.status == 403 and not exc.value.retryable
+
+
+def test_date_cells_get_a_real_date_format():
+    # values first, then the tab's id (the first tab's id 0 is omitted from the JSON), then the format
+    client, session = client_with([
+        FakeResponse(200, {}),
+        FakeResponse(200, {"sheets": [{"properties": {"title": "Other", "sheetId": 7}}, {"properties": {"title": "Nov"}}]}),
+        FakeResponse(200, {}),
+    ])
+    client.write_cells("SID", "Nov", [CellWrite(46, 41, 46335, date_format="dd-mm-yyyy"), CellWrite(46, 43, 120.0)], user_entered=True)
+    (_, url1, kw1), (_, url2, _), (method, url3, kw3) = session.calls
+    assert url1.endswith("/values:batchUpdate") and kw1["json"]["valueInputOption"] == "USER_ENTERED"
+    assert kw1["json"]["data"][0] == {"range": "'Nov'!AO46", "values": [[46335]]}
+    assert method == "POST" and url3.endswith("/spreadsheets/SID:batchUpdate")
+    (request,) = kw3["json"]["requests"]  # only the date cell is formatted
+    assert request["repeatCell"]["range"] == {"sheetId": 0, "startRowIndex": 45, "endRowIndex": 46, "startColumnIndex": 40, "endColumnIndex": 41}
+    assert request["repeatCell"]["cell"]["userEnteredFormat"]["numberFormat"] == {"type": "DATE", "pattern": "dd-mm-yyyy"}

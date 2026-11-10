@@ -22,7 +22,7 @@ _REPORT_HINT_RE = re.compile(r"\b(loader|trips?|qty|shift)\b", re.I)
 FORMAT_HINT = (
     "Expected format:\n"
     "<code>DATE:- 06/11/2026\nSHIFT:- 1st Shift\nLOADER - 01\nTrip:- 42 Qty:-1340.840</code>\n\n"
-    "Trip card / HSD? Start the message with <code>CARD L11</code> — see /card_format"
+    "Trips / hour meter / diesel for a loader? Start with <code>L11 10-11</code> — see /card_format"
 )
 
 

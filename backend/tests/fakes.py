@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -152,13 +153,27 @@ class FakeSheets:
                 if w.value == "":
                     ws.cells.pop((w.row, w.col), None)
                 elif user_entered and isinstance(w.value, str) and w.value.startswith("="):
-                    # only sums of numbers are evaluated (that is all the bot writes as a formula)
-                    total = sum(float(part) for part in w.value[1:].split("+"))
-                    ws.cells[(w.row, w.col)] = CellValue(effective=total, formatted=f"{total:.2f}", formula=w.value)
+                    ws.cells[(w.row, w.col)] = CellValue(effective=_evaluate(ws, w.value), formatted=None, formula=w.value)
+                elif w.date_format:
+                    shown = (SHEETS_EPOCH + timedelta(days=int(w.value))).strftime("%d-%m-%Y")
+                    ws.cells[(w.row, w.col)] = CellValue(effective=w.value, formatted=shown)
                 else:
                     ws.cells[(w.row, w.col)] = CellValue(effective=w.value, formatted=str(w.value))
             self.writes.append((spreadsheet_id, worksheet, list(writes)))
             self.write_modes.append(user_entered)
+
+
+def _evaluate(ws: FakeWorksheet, formula: str):
+    """The two formula shapes the bot writes: a sum of litres (=190+154.98) and the refill
+    average (=AQ47/(AR47-AR46))."""
+    body = formula[1:]
+    if re.fullmatch(r"[\d.+]+", body):
+        return sum(float(part) for part in body.split("+"))
+    m = re.fullmatch(r"([A-Z]+\d+)/\(([A-Z]+\d+)-([A-Z]+\d+)\)", body)
+    if m:
+        litres, hm, prev = (float(ws.value(ref) or 0) for ref in m.groups())
+        return litres / (hm - prev) if hm != prev else None
+    raise AssertionError(f"fake sheet cannot evaluate {formula}")
 
 
 # --- Sheet builders matching the real layout (columns B..N) -------------------------------------
@@ -279,3 +294,41 @@ def add_card_block(
         d += timedelta(days=1)
         row += 1
     return rows
+
+
+def add_hm_block(ws: FakeWorksheet, *, top: int, left: int = 31, loader_number: int = 11, year: int = 2026, month: int = 11) -> dict[date, int]:
+    """Like the real "Loader 11 Opening and Closing" (title AE41, header AE42): Date and an
+    opening / closing hour-meter column per shift."""
+    ws.set((top, left), f"Loader {loader_number:02d} Opening and Closing ")
+    headers = ["Date"] + [f"{s} shift {w} HM" for s in ("1st", "2nd", "3rd") for w in ("Opening", "Closing")]
+    for offset, header in enumerate(headers):
+        ws.set((top + 1, left + offset), header)
+    rows: dict[date, int] = {}
+    d, row = date(year, month, 1), top + 2
+    while d.month == month:
+        ws.set((row, left), serial(d), formatted=d.strftime("%d-%m-%Y"))
+        rows[d] = row
+        d += timedelta(days=1)
+        row += 1
+    return rows
+
+
+def add_refill_log(
+    ws: FakeWorksheet, *, top: int, left: int = 41, loader_number: int = 11, entries: list[tuple[date, float, float]] = ()
+) -> int:
+    """Like the real "Loader 11 hsd avg" (title AO41): Date, (hidden column), hsd, hm, avg — one
+    row per refill, avg = litres / HM run since the row above. Returns the first data row."""
+    ws.set((top, left), f"Loader {loader_number:02d} hsd avg")
+    for offset, header in ((0, "Date"), (2, "hsd"), (3, "hm"), (4, "avg")):
+        ws.set((top + 1, left + offset), header)
+    first = top + 2
+    for i, (d, litres, hm) in enumerate(entries):
+        row = first + i
+        ws.set((row, left), serial(d), formatted=d.strftime("%m/%d/%Y"))
+        ws.set((row, left + 2), litres)
+        ws.set((row, left + 3), hm)
+        if i:
+            hsd_ref, hm_ref = f"{column_letter(left + 2)}{row}", f"{column_letter(left + 3)}{row}"
+            formula = f"={hsd_ref}/({hm_ref}-{column_letter(left + 3)}{row - 1})"
+            ws.set((row, left + 4), _evaluate(ws, formula), formula=formula)
+    return first

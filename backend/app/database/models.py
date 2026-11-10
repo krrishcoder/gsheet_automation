@@ -368,8 +368,9 @@ class ShiftEntry(Base):
 
 
 class CardEntry(Base):
-    """A typed trip-card / HSD message for one loader and day: any of the three shifts' trips and
-    the day's tanker fills, written to the loader's card block (e.g. "Loader 11 Card Details")."""
+    """A typed card message for one loader and day: any of the shifts' trips and opening/closing
+    hour meter, and diesel refills. Written to the loader's blocks (Card Details, Opening and
+    Closing, hsd avg); see card_service."""
 
     __tablename__ = "card_entries"
 
@@ -378,7 +379,9 @@ class CardEntry(Base):
     loader_id: Mapped[int | None] = mapped_column(ForeignKey("loaders.id"), index=True)
     entry_date: Mapped[date] = mapped_column(Date)
     trips: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # {"1": 36, "3": 44}: only shifts sent
-    hsd_fills: Mapped[list[str]] = mapped_column(JSON, default=list)  # decimal strings, litres
+    hsd_fills: Mapped[list[str]] = mapped_column(JSON, default=list)  # litres of every fill (decimal strings)
+    hm_readings: Mapped[dict[str, Any] | None] = mapped_column(JSON)  # {"o1": "4268", "c1": "4276.2"}
+    refills: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON)  # [{"litres": "132.4", "hm": "4276.2"}]
     telegram_user_id: Mapped[int] = mapped_column(BigInteger, index=True)
     chat_id: Mapped[int] = mapped_column(BigInteger)
     source_message_id: Mapped[int | None] = mapped_column(BigInteger)

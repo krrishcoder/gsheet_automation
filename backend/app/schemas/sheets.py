@@ -97,3 +97,4 @@ class CellWrite:
     row: int
     col: int
     value: int | float | str  # "" clears the cell
+    date_format: str | None = None  # value is a date serial; show it with this pattern (e.g. dd-mm-yyyy)

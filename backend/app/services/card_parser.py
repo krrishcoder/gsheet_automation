@@ -1,16 +1,20 @@
-"""Parser for typed trip-card / HSD messages.
+"""Parser for typed trip-card / hour-meter / HSD messages.
 
-Shape (every shift line and the HSD line are optional; send what you have)::
+Short form (every code is optional; send what you have)::
 
-    CARD L11
-    Date: 06-11-2026
-    1st: 36
-    2nd: 37
-    3rd: 44
-    HSD: 190 + 154.98
+    L11 10-11
+    T1 37 O1 4268 C1 4272
+    T2 35 O2 4272 C2 4276.2
+    T3 40 O3 4276.2 C3 4280
+    H 132.4 4276.2
 
-or on one line: ``CARD L11 06-11 3rd 44 HSD 154.98``. A message is a card message when its first
-line contains the word "card". As with reports, nothing is guessed: an unreadable line is an error.
+* first line: loader and date (``L11 10-11``)
+* ``T1``-``T3`` trips, ``O1``-``O3`` opening HM, ``C1``-``C3`` closing HM of that shift
+* ``H <litres> <HM>``: a diesel refill and the hour meter at the refill (one ``H`` per refill)
+
+The older long form still works (``CARD L11`` / ``Date: 06-11-2026`` / ``1st: 36`` /
+``HSD: 190 + 154.98``), and both can be mixed. As with reports nothing is guessed: any number
+the parser could not place is an error.
 """
 
 from __future__ import annotations
@@ -20,19 +24,32 @@ from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 
-from app.services.report_parser import _build_date, normalize_text, parse_date_value, parse_decimal, parse_int
+from app.services.report_parser import (
+    _DATE_PATTERNS,
+    _build_date,
+    normalize_text,
+    parse_date_value,
+    parse_decimal,
+    parse_int,
+)
 
 CARD_FORMAT = (
-    "CARD L11\n"
-    "Date: 06-11-2026\n"
-    "1st: 36\n"
-    "2nd: 37\n"
-    "3rd: 44\n"
-    "HSD: 190 + 154.98"
+    "L11 10-11\n"
+    "T1 37 O1 4268 C1 4272\n"
+    "T2 35 O2 4272 C2 4276.2\n"
+    "T3 40 O3 4276.2 C3 4280\n"
+    "H 132.4 4276.2"
 )
 
 _CARD_WORD_RE = re.compile(r"(?<![a-z])card(?![a-z])", re.I)
 _LOADER_RE = re.compile(r"(?<![a-z0-9])(?:loader|ldr|l)[ \t]*(?:no\.?)?[ \t]*[-:#.]*[ \t]*(?P<num>\d{1,3})(?![\d./\-])", re.I)
+# "L11 …" / "LDR 11 …" start a card message; "Loader 11" only when a date follows (so that a
+# forwarded report section such as "LOADER - 01" is never taken for one)
+_SHORT_HEADER_RE = re.compile(
+    r"^(?:(?:ldr|l)[ \t]*[-:#.]*[ \t]*\d{1,3}(?![\d./\-])"
+    r"|loader[ \t]*[-:#.]*[ \t]*\d{1,3}(?![\d./\-]).*?\d{1,2}[ \t]*[/\-.][ \t]*\d{1,2})",
+    re.I,
+)
 _DATE_LABEL_RE = re.compile(r"(?<![a-z])date(?![a-z])[ \t:=\->.]*(?P<value>[^\n]*)", re.I)
 # Without a year only "-" or "/" separate day and month, so an HSD amount such as 99.06 is never a date.
 _SHORT_DATE_RE = re.compile(r"(?<![\d./\-])(?P<d>\d{1,2})[ \t]*[/\-][ \t]*(?P<m>\d{1,2})(?![\d/\-])")
@@ -42,10 +59,21 @@ _SHIFT_RE = re.compile(
     re.I,
 )
 _SHIFT_TOKENS = {"1st": 1, "first": 1, "2nd": 2, "second": 2, "3rd": 3, "third": 3}
+# T1 37 · O1 4268 · C1 4276.2 (T = trips, O = opening HM, C = closing HM; the digit is the shift)
+_CODE_RE = re.compile(r"(?<![a-z0-9])(?P<code>[toc])[ \t]*(?P<shift>[1-3])(?![\d.,])[ \t]*[:=\-]*[ \t]*(?P<val>\d[\d.,]*|nil+)?", re.I)
+# H 132.4 4276.2 (litres, then the hour meter at the refill)
+_REFILL_RE = re.compile(
+    r"(?<![a-z0-9])h(?![a-z])[ \t]*[:=\-]*[ \t]*(?P<litres>\d[\d.,]*)?"
+    r"(?:[ \t]*(?:ltrs?|litres?|liters?|l)\.?(?![a-z]))?"
+    r"(?:[ \t]*(?:@|at(?![a-z])|/|hm)?[ \t]*[:=\-]*[ \t]*(?P<hm>\d[\d.,]*))?",
+    re.I,
+)
 _HSD_RE = re.compile(r"(?<![a-z])(?:hsd|diesel|fuel)(?![a-z])(?:[ \t]*fuel)?(?P<rest>[^\n]*)", re.I)
-_HSD_SPLIT_RE = re.compile(r"\+|&|(?<![a-z])and(?![a-z])|,[ \t]+|[ \t]+", re.I)
-_UNIT_RE = re.compile(r"(?i)(?:ltrs?|litres?|liters?|l)\.?$")
+_HSD_SPLIT_RE = re.compile(r"\+|&|(?<![a-z])and(?![a-z])|,[ \t]+", re.I)
+_HSD_UNIT_RE = re.compile(r"(?<=[\d\s])(?:ltrs?|litres?|liters?|l)\.?(?![a-z])", re.I)
 _NIL_RE = re.compile(r"^(?:nil+|null|none|na)$", re.I)
+_TOKENS_RE = (_SHIFT_RE, _CODE_RE, _REFILL_RE, _HSD_RE)
+_LABEL = {1: "1st", 2: "2nd", 3: "3rd"}
 
 
 class CardParseError(ValueError):
@@ -54,102 +82,192 @@ class CardParseError(ValueError):
         self.errors = errors
 
 
+@dataclass(frozen=True)
+class Refill:
+    litres: Decimal
+    hm: Decimal | None  # hour meter at the refill; None for an "HSD:" line, which has no HM
+
+
 @dataclass
 class ParsedCard:
     loader_number: int
     entry_date: date
     trips: dict[int, int] = field(default_factory=dict)  # shift -> trips, only the shifts that were sent
-    hsd_fills: list[Decimal] = field(default_factory=list)  # tanker fills for the day, in litres
+    opening: dict[int, Decimal] = field(default_factory=dict)  # shift -> opening hour meter
+    closing: dict[int, Decimal] = field(default_factory=dict)  # shift -> closing hour meter
+    refills: list[Refill] = field(default_factory=list)
+
+    @property
+    def hsd_fills(self) -> list[Decimal]:
+        return [r.litres for r in self.refills]
 
 
 def is_card_message(text: str) -> bool:
-    normalized = normalize_text(text or "")
-    first_line = normalized.split("\n", 1)[0]
-    return bool(_CARD_WORD_RE.search(first_line))
+    first_line = normalize_text(text or "").split("\n", 1)[0]
+    return bool(_CARD_WORD_RE.search(first_line) or _SHORT_HEADER_RE.match(first_line))
+
+
+class _Body:
+    """The message after its header line, with the parts that were read marked off."""
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self._read = bytearray(len(text))
+
+    def take(self, start: int, end: int) -> None:
+        self._read[start:end] = b"\x01" * (end - start)
+
+    def unread_numbers(self) -> list[str]:
+        rest = "".join(" " if self._read[i] else ch for i, ch in enumerate(self.text))
+        return re.findall(r"\S*\d\S*", rest)
 
 
 def _header(text: str) -> str:
-    """The first line without its shift/HSD part (one-line messages), where loader and date live."""
+    """The first line without its codes (one-line messages): where loader and date live."""
     first = text.split("\n", 1)[0]
-    cut = [m.start() for m in (_SHIFT_RE.search(first), _HSD_RE.search(first)) if m]
+    cut = [m.start() for m in (pattern.search(first) for pattern in _TOKENS_RE) if m]
     return first[: min(cut)] if cut else first
 
 
-def _parse_date(text: str, header: str, today: date, errors: list[str]) -> date | None:
-    labelled = _DATE_LABEL_RE.search(text)
-    candidates = [labelled.group("value")] if labelled else [header]
-    for candidate in candidates:
-        try:
-            full = parse_date_value(candidate)
-        except ValueError:
-            errors.append(f"Date: '{candidate.strip()}' is not a valid date")
-            return None
-        if full:
-            return full
-        short = _SHORT_DATE_RE.search(candidate)
-        if short:
-            day, month = int(short["d"]), int(short["m"])
-            try:
-                found = _build_date(today.year, month, day)
-            except ValueError:
-                errors.append(f"Date: '{short.group(0)}' is not a valid date")
-                return None
-            # "06-11" typed in early January means last year's November
-            return found if found <= today else _build_date(today.year - 1, month, day)
-    if labelled:
-        errors.append(f"Date: could not read '{labelled.group('value').strip()}' (use 06-11-2026)")
+def _header_leftovers(header: str) -> list[str]:
+    """Numbers in the first line other than the loader and the date."""
+    rest = _LOADER_RE.sub(" ", header, count=1)
+    for _, pattern in _DATE_PATTERNS:
+        if pattern.search(rest):
+            rest = pattern.sub(" ", rest, count=1)
+            break
     else:
-        errors.append("Date missing — add a line like 'Date: 06-11-2026'")
+        rest = _SHORT_DATE_RE.sub(" ", rest, count=1)
+    return re.findall(r"\S*\d\S*", rest)
+
+
+def _short_date(candidate: str, today: date, errors: list[str]) -> date | None:
+    short = _SHORT_DATE_RE.search(candidate)
+    if not short:
+        return None
+    day, month = int(short["d"]), int(short["m"])
+    try:
+        found = _build_date(today.year, month, day)
+    except ValueError:
+        errors.append(f"Date: '{short.group(0)}' is not a valid date")
+        return None
+    # "06-11" typed in early January means last year's November
+    return found if found <= today else _build_date(today.year - 1, month, day)
+
+
+def _parse_date(header: str, body: _Body, today: date, errors: list[str]) -> date | None:
+    labelled = _DATE_LABEL_RE.search(body.text)
+    candidate = labelled.group("value") if labelled else header
+    if labelled:
+        body.take(labelled.start(), labelled.end())
+    try:
+        full = parse_date_value(candidate)
+    except ValueError:
+        errors.append(f"Date: '{candidate.strip()}' is not a valid date")
+        return None
+    reported = len(errors)
+    found = full or _short_date(candidate, today, errors)
+    if found or len(errors) > reported:
+        return found
+    if labelled:
+        errors.append(f"Date: could not read '{labelled.group('value').strip()}' (use 10-11 or 10-11-2026)")
+    else:
+        errors.append("Date missing — put it after the loader: 'L11 10-11'")
     return None
 
 
-def _parse_loader(text: str, header: str, errors: list[str]) -> int | None:
+def _parse_loader(header: str, body: _Body, errors: list[str]) -> int | None:
     match = _LOADER_RE.search(header)
     if match is None:
-        line = next((l for l in text.split("\n") if re.match(r"(?i)\s*(?:loader|ldr)\b", l)), "")
-        match = _LOADER_RE.search(line)
+        for line in re.finditer(r"(?im)^[ \t]*(?:loader|ldr)\b[^\n]*", body.text):
+            match = _LOADER_RE.search(line.group(0))
+            if match:
+                body.take(line.start(), line.end())
+                break
     if match is None:
-        errors.append("Loader missing — start with 'CARD L11' (L and the loader number)")
+        errors.append("Loader missing — start with 'L11' (L and the loader number)")
         return None
     return int(match["num"])
 
 
-def _parse_shifts(text: str, errors: list[str]) -> dict[int, int]:
-    trips: dict[int, int] = {}
-    for match in _SHIFT_RE.finditer(text):
+def _put(values: dict, key: int, value, what: str, errors: list[str]) -> None:
+    if key in values and values[key] != value:
+        errors.append(f"{what} given twice ({values[key]} and {value})")
+    else:
+        values[key] = value
+
+
+def _parse_shift_lines(body: _Body, trips: dict[int, int], errors: list[str]) -> None:
+    for match in _SHIFT_RE.finditer(body.text):
+        body.take(match.start(), match.end())
         shift = _SHIFT_TOKENS[match["ord"].lower()] if match["ord"] else int(match["num"])
-        label = {1: "1st", 2: "2nd", 3: "3rd"}[shift]
-        value = match["val"]
+        label, value = _LABEL[shift], match["val"]
         if value is None:
-            errors.append(f"{label} shift: no trips number after it (e.g. '{label}: 36')")
+            errors.append(f"{label} shift: no trips number after it (e.g. 'T{shift} 36')")
+        elif not _NIL_RE.match(value):
+            try:
+                _put(trips, shift, parse_int(value), f"{label} shift trips", errors)
+            except ValueError as exc:
+                errors.append(f"{label} shift: {exc}")
+
+
+def _parse_codes(body: _Body, card: ParsedCard, errors: list[str]) -> None:
+    for match in _CODE_RE.finditer(body.text):
+        body.take(match.start(), match.end())
+        code, shift, value = match["code"].upper(), int(match["shift"]), match["val"]
+        name = {"T": "trips", "O": "opening HM", "C": "closing HM"}[code]
+        if value is None:
+            errors.append(f"{code}{shift}: no number after it (e.g. '{code}{shift} {'36' if code == 'T' else '4268'}')")
             continue
         if _NIL_RE.match(value):
-            continue  # Nil: nothing to save for that shift
+            continue
         try:
-            number = parse_int(value)
+            if code == "T":
+                _put(card.trips, shift, parse_int(value), f"{_LABEL[shift]} shift trips", errors)
+            else:
+                _put(card.opening if code == "O" else card.closing, shift, parse_decimal(value), f"{code}{shift} ({name})", errors)
         except ValueError as exc:
-            errors.append(f"{label} shift: {exc}")
-            continue
-        if shift in trips and trips[shift] != number:
-            errors.append(f"{label} shift given twice ({trips[shift]} and {number})")
-            continue
-        trips[shift] = number
-    return trips
+            errors.append(f"{code}{shift} ({name}): {exc}")
 
 
-def _parse_hsd(text: str, errors: list[str]) -> list[Decimal]:
-    fills: list[Decimal] = []
-    for match in _HSD_RE.finditer(text):
+def _parse_refills(body: _Body, refills: list[Refill], errors: list[str]) -> None:
+    for match in _REFILL_RE.finditer(body.text):
+        body.take(match.start(), match.end())
+        if match["litres"] is None:
+            errors.append("H: litres missing (e.g. 'H 132.4 4276.2' = 132.4 L at HM 4276.2)")
+            continue
+        try:
+            litres = parse_decimal(match["litres"])
+            hm = parse_decimal(match["hm"]) if match["hm"] else None
+        except ValueError as exc:
+            errors.append(f"H: {exc}")
+            continue
+        if litres <= 0:
+            errors.append(f"H: litres must be more than 0, got '{match['litres']}'")
+            continue
+        if hm is None:
+            errors.append(f"H {match['litres']}: HM missing — write the hour meter after the litres ('H {match['litres']} 4276.2')")
+            continue
+        refills.append(Refill(litres, hm))
+
+
+def _parse_hsd_lines(body: _Body, refills: list[Refill], errors: list[str]) -> None:
+    """Long form: ``HSD: 190 + 154.98`` (litres of each fill, no hour meter)."""
+    for match in _HSD_RE.finditer(body.text):
         rest = match["rest"]
-        # stop at a shift written after HSD on the same line ("HSD 154.98 3rd 44")
-        shift = _SHIFT_RE.search(rest)
-        rest = re.sub(r"\([^)]*\)", " ", rest[: shift.start()] if shift else rest).strip(" \t:=-.>")  # "HSD (L): 190"
-        parts = [p for p in (_UNIT_RE.sub("", p.strip()) for p in _HSD_SPLIT_RE.split(rest)) if p]
+        nxt = [m.start() for m in (p.search(rest) for p in (_SHIFT_RE, _CODE_RE)) if m]
+        rest = rest[: min(nxt)] if nxt else rest
+        body.take(match.start(), match.start("rest") + len(rest))
+        rest = _HSD_UNIT_RE.sub(" ", re.sub(r"\([^)]*\)", " ", rest)).strip(" \t:=-.>")  # "HSD (L): 190 L"
+        parts = [p.strip() for p in _HSD_SPLIT_RE.split(rest) if p.strip()]
         if not parts:
-            errors.append("HSD: no litres after it (e.g. 'HSD: 190 + 154.98')")
+            errors.append("HSD: no litres after it (e.g. 'HSD: 190 + 154.98', or 'H 190 4268' with the HM)")
             continue
         for part in parts:
             if _NIL_RE.match(part):
+                continue
+            if re.search(r"\d\s+\d", part):
+                errors.append(f"HSD: '{part}' — put + between fills, or use 'H <litres> <HM>' for a refill with its HM")
                 continue
             try:
                 value = parse_decimal(part)
@@ -159,24 +277,26 @@ def _parse_hsd(text: str, errors: list[str]) -> list[Decimal]:
             if value <= 0:
                 errors.append(f"HSD: '{part}' must be more than 0")
                 continue
-            fills.append(value)
-    return fills
+            refills.append(Refill(value, None))
 
 
 def parse_card(raw_text: str, *, today: date) -> ParsedCard:
     text = normalize_text(raw_text or "")
     errors: list[str] = []
     header = _header(text)
-    loader = _parse_loader(text, header, errors)
-    entry_date = _parse_date(text, header, today, errors)
-    body = text[len(header):]  # the loader/date header must not be read as a shift or HSD value
-    trips = _parse_shifts(body, errors)
-    hsd = _parse_hsd(body, errors)
-    if not errors and not trips and not hsd:
-        errors.append("Nothing to save — add a shift line ('1st: 36') or an HSD line ('HSD: 190')")
+    body = _Body(text[len(header):])  # the loader/date header must not be read as a value
+    loader = _parse_loader(header, body, errors)
+    entry_date = _parse_date(header, body, today, errors)
+    card = ParsedCard(loader_number=loader or 0, entry_date=entry_date or today)
+    _parse_hsd_lines(body, card.refills, errors)
+    _parse_shift_lines(body, card.trips, errors)
+    _parse_codes(body, card, errors)
+    _parse_refills(body, card.refills, errors)
+    errors += [f"Could not read '{token}'" for token in _header_leftovers(header) + body.unread_numbers()]
+    if not errors and not (card.trips or card.opening or card.closing or card.refills):
+        errors.append("Nothing to save — add e.g. 'T1 36', 'O1 4268', 'C1 4276.2' or 'H 132.4 4276.2'")
     if entry_date and entry_date > today:
         errors.append(f"Date {entry_date:%d-%m-%Y} is in the future")
     if errors:
         raise CardParseError(errors)
-    assert loader is not None and entry_date is not None
-    return ParsedCard(loader_number=loader, entry_date=entry_date, trips=trips, hsd_fills=hsd)
+    return card

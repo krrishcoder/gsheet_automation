@@ -16,7 +16,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from sqlalchemy import create_engine, event, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -81,6 +81,31 @@ class Database:
 
     def create_all(self) -> None:
         Base.metadata.create_all(self.engine)
+        self._add_missing_columns()
+
+    def _add_missing_columns(self) -> None:
+        """create_all() never changes a table that already exists, so a nullable column added to a
+        model later is added here (the only kind of schema change this app makes)."""
+        inspector = inspect(self.engine)
+        dialect = self.engine.dialect
+        statements = []
+        for table in Base.metadata.sorted_tables:
+            if not inspector.has_table(table.name):
+                continue
+            existing = {c["name"] for c in inspector.get_columns(table.name)}
+            for column in table.columns:
+                if column.name in existing:
+                    continue
+                if not column.nullable:
+                    raise RuntimeError(f"Cannot add NOT NULL column {table.name}.{column.name} automatically")
+                guard = "IF NOT EXISTS " if dialect.name == "postgresql" else ""
+                statements.append(
+                    f"ALTER TABLE {table.name} ADD COLUMN {guard}{column.name} {column.type.compile(dialect)}"
+                )
+        if statements:
+            with self.engine.begin() as conn:
+                for statement in statements:
+                    conn.execute(text(statement))
 
     @contextmanager
     def session(self) -> Iterator[Session]:

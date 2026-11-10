@@ -433,69 +433,156 @@ def locate_table(
     return sub, layout, table
 
 
-# --- Card-details blocks ----------------------------------------------------------------------
+# --- A loader's other blocks: card details, opening/closing HM, HSD refill log -----------------
 
-CARD_TRIP_COLUMNS = {1: Col.SHIFT_1_TRIPS, 2: Col.SHIFT_2_TRIPS, 3: Col.SHIFT_3_TRIPS}
-_CARD_HEADERS = "Date, HSD Fuel (L), 1st Shift Trips, 2nd Shift Trips, 3rd Shift Trips"
+_OPEN_RE = re.compile(r"\bopen")
+_CLOSE_RE = re.compile(r"\bclos")
+_HM_RE = re.compile(r"\b(?:hm|hmr|hour ?meter)\b")
 
 
-def detect_card_layout(grid: SheetGrid, *, scan_rows: int = 20) -> SheetLayout:
-    """Columns of a trip-card block: Date, one trips column per shift and (optionally) HSD Fuel.
-    Other columns (Total Trips, Est. Weight, …) are the sheet's own and are never written."""
+def _card_key(label: str) -> str | None:
+    logical = classify_label(label)
+    if logical is Col.HSD_FUEL:
+        return "hsd"
+    for shift in (1, 2, 3):
+        if logical is Col(f"SHIFT_{shift}_TRIPS"):
+            return f"trips{shift}"
+    return None
+
+
+def _hm_key(label: str) -> str | None:
+    shift = _shift_of(label)
+    if shift and _OPEN_RE.search(label):
+        return f"open{shift}"
+    if shift and _CLOSE_RE.search(label):
+        return f"close{shift}"
+    return None
+
+
+def _log_key(label: str) -> str | None:
+    if _shift_of(label):
+        return None
+    if _AVG_RE.search(label):
+        return "avg"
+    if _HM_RE.search(label):
+        return "hm"
+    if _FUEL_RE.search(label):
+        return "hsd"
+    return None
+
+
+@dataclass(frozen=True)
+class BlockKind:
+    name: str
+    classify: object  # label -> column key
+    required: tuple[str, ...]
+    optional: tuple[str, ...]
+    example: str  # how to title and head such a block ({n} = loader number)
+
+
+BLOCK_KINDS = {
+    "card": BlockKind(
+        "card block",
+        _card_key,
+        ("trips1", "trips2", "trips3"),
+        ("hsd",),
+        "'Loader {n} Card Details' with the columns Date, HSD Fuel (L), 1st Shift Trips, 2nd Shift Trips, 3rd Shift Trips",
+    ),
+    "hm": BlockKind(
+        "opening/closing HM block",
+        _hm_key,
+        ("open1", "close1", "open2", "close2", "open3", "close3"),
+        (),
+        "'Loader {n} Opening and Closing' with the columns Date, 1st shift Opening HM, 1st shift Closing HM, "
+        "… 3rd shift Closing HM",
+    ),
+    "log": BlockKind(
+        "HSD refill log",
+        _log_key,
+        ("hsd", "hm"),
+        ("avg",),
+        "'Loader {n} hsd avg' with the columns Date, hsd, hm, avg",
+    ),
+}
+
+
+@dataclass(frozen=True)
+class Block:
+    """One of a loader's blocks, e.g. "Loader 11 Card Details". Columns are keyed by name
+    (trips1, hsd, open2, close3, hm, avg, …); ``grid`` holds only the block's own cells."""
+
+    kind: str
+    grid: SheetGrid
+    layout: SheetLayout  # its Date column and first data row
+    columns: dict[str, int]
+    region: TableRegion
+    bounded: bool  # another table starts right below it (an append-only log cannot grow past it)
+
+    def ref(self, key: str, row: int) -> str:
+        return f"{column_letter(self.columns[key])}{row}"
+
+
+def detect_block_layout(grid: SheetGrid, kind: str, *, scan_rows: int = 20) -> tuple[SheetLayout, dict[str, int]]:
+    spec = BLOCK_KINDS[kind]
     date_row, date_col = _find_date_header(grid, scan_rows, None)
     header_rows = [date_row]
     if date_row - 1 >= grid.start_row and _row_has_shift_groups(grid, date_row - 1):
         header_rows.insert(0, date_row - 1)
     if _row_is_subheader(grid, date_row + 1, date_col):
         header_rows.append(date_row + 1)
-    found: dict[Col, list[int]] = {}
+    found: dict[str, list[int]] = {}
     for col, label in _combined_labels(grid, header_rows).items():
-        logical = classify_label(label)
-        if logical in (Col.HSD_FUEL, *CARD_TRIP_COLUMNS.values()):
-            found.setdefault(logical, []).append(col)
-    columns = {Col.DATE: date_col}
+        key = spec.classify(label) if col != date_col else None
+        if key:
+            found.setdefault(key, []).append(col)
+    columns: dict[str, int] = {}
     problems = []
-    for logical in (*CARD_TRIP_COLUMNS.values(), Col.HSD_FUEL):
-        cols = found.get(logical, [])
+    for key in spec.required + spec.optional:
+        cols = found.get(key, [])
         if len(cols) == 1:
-            columns[logical] = cols[0]
+            columns[key] = cols[0]
         elif cols:
-            problems.append(f"{logical.value} in more than one column ({', '.join(column_letter(c) for c in cols)})")
-        elif logical is not Col.HSD_FUEL:
-            problems.append(f"no {logical.value} column")
+            problems.append(f"'{key}' in more than one column ({', '.join(column_letter(c) for c in cols)})")
+        elif key in spec.required:
+            problems.append(f"no '{key}' column")
     if problems:
-        raise SheetLayoutError(
-            "CARD_HEADER_NOT_RECOGNISED", f"Card block headers not recognised ({'; '.join(problems)}); expected {_CARD_HEADERS}"
-        )
-    return SheetLayout(columns=columns, header_rows=header_rows, data_start_row=header_rows[-1] + 1, detected=True)
+        # no column of this kind at all: a different kind of block, not a mistyped one
+        code = "BLOCK_HEADER_NOT_RECOGNISED" if found else "BLOCK_OTHER_KIND"
+        raise SheetLayoutError(code, f"{spec.name} headers not recognised ({'; '.join(problems)})")
+    layout = SheetLayout(columns={Col.DATE: date_col}, header_rows=header_rows, data_start_row=header_rows[-1] + 1, detected=True)
+    return layout, columns
 
 
-def locate_card_table(
-    grid: SheetGrid, loader_number: int, configured: dict[str, str], *, scan_rows: int = 20
-) -> tuple[SheetGrid, SheetLayout, TableRegion]:
-    """The loader's trip-card block: a table titled for the loader (e.g. "Loader 11 Card Details")
-    that is not its shift report and has a trips column per shift."""
+def locate_block(
+    grid: SheetGrid, loader_number: int, kind: str, configured: dict[str, str], *, scan_rows: int = 20
+) -> Block:
+    """The loader's block of this kind: a table titled for the loader (e.g. "Loader 11 hsd avg")
+    that is not its shift report and whose headers fit the kind."""
+    spec = BLOCK_KINDS[kind]
     found, reasons = [], []
     for table in find_tables(grid):
         if table.loader_number != loader_number or _is_report_table(grid, table, configured, scan_rows):
             continue
         sub = _region(grid, table)
         try:
-            found.append((sub, detect_card_layout(sub, scan_rows=scan_rows), table))
+            layout, columns = detect_block_layout(sub, kind, scan_rows=scan_rows)
         except SheetLayoutError as exc:
-            reasons.append(f"{table.describe()}: {exc.message}")
+            if exc.code == "BLOCK_HEADER_NOT_RECOGNISED":
+                reasons.append(f"{table.describe()}: {exc.message}")
+            continue
+        columns = {"date": layout.col(Col.DATE), **columns}
+        found.append(Block(kind, sub, layout, columns, table, bounded=table.last_row < grid.last_row))
     if len(found) == 1:
         return found[0]
+    n = f"{loader_number:02d}"
     if found:
         raise SheetLayoutError(
-            "CARD_TABLE_AMBIGUOUS",
-            f"'{grid.title}' has {len(found)} card blocks for Loader {loader_number:02d}: "
-            + "; ".join(t.describe() for _, _, t in found),
+            "BLOCK_AMBIGUOUS",
+            f"'{grid.title}' has {len(found)} {spec.name}s for Loader {n}: " + "; ".join(b.region.describe() for b in found),
         )
     raise SheetLayoutError(
-        "CARD_TABLE_NOT_FOUND",
-        f"'{grid.title}' has no card block for Loader {loader_number:02d}. Add a block titled "
-        f"'Loader {loader_number:02d} Card Details' with the columns {_CARD_HEADERS}"
+        "BLOCK_NOT_FOUND",
+        f"'{grid.title}' has no {spec.name} for Loader {n}. Add a block titled {spec.example.format(n=n)}"
         + (f" ({'; '.join(reasons)})" if reasons else ""),
     )
 

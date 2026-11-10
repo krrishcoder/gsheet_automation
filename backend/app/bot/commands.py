@@ -196,7 +196,7 @@ def cmd_help(ctx: CommandContext) -> str:
     return "\n".join(lines)
 
 
-@command("card_format", "/card_format", "How to send trip-card trips and HSD", requires_user=False)
+@command("card_format", "/card_format", "Short message for card trips, hour meter and diesel", requires_user=False)
 def cmd_card_format(ctx: CommandContext) -> str:
     return CARD_FORMAT_HELP
 
