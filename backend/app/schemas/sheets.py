@@ -50,6 +50,19 @@ class SheetGrid:
     start_row: int = 1  # 1-based row number of rows[0]
     start_col: int = 1  # 1-based column number of rows[*][0]
     merges: list[MergedRange] = field(default_factory=list)
+    parent: "SheetGrid | None" = field(default=None, repr=False, compare=False)
+
+    def subgrid(self, first_row: int, last_row: int, first_col: int, last_col: int) -> "SheetGrid":
+        """A view of one rectangular area (e.g. one loader's table); coordinates stay absolute."""
+        rows = [[self.cell(r, c) for c in range(first_col, last_col + 1)] for r in range(first_row, last_row + 1)]
+        return SheetGrid(
+            title=self.title,
+            rows=rows,
+            start_row=first_row,
+            start_col=first_col,
+            merges=self.merges,
+            parent=self.parent or self,
+        )
 
     @property
     def last_row(self) -> int:
@@ -72,9 +85,10 @@ class SheetGrid:
         own = self.cell(row, col)
         if not own.is_empty:
             return own.text
+        source = self.parent or self  # a merge's top-left may lie outside a subgrid
         for merge in self.merges:
             if merge.contains(row, col):
-                return self.cell(merge.first_row, merge.first_col).text
+                return source.cell(merge.first_row, merge.first_col).text
         return ""
 
 

@@ -76,8 +76,8 @@ class Settings(BaseSettings):
     sheet_header_detection: bool = True
     sheet_header_strict: bool = True  # every required column must be found by its header text
     sheet_header_scan_rows: int = Field(default=20, ge=1)
-    sheet_read_max_rows: int = Field(default=150, ge=10)
-    sheet_read_last_column: str = "Z"
+    sheet_read_max_rows: int = Field(default=400, ge=10)
+    sheet_read_last_column: str = "BZ"  # room for several loader tables side by side
     sheet_column_map: dict[str, str] = Field(default_factory=lambda: dict(DEFAULT_COLUMN_MAP))
 
     # Calculations / validation

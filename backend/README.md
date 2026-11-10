@@ -37,7 +37,7 @@ confirm or correct them before go-live.
 | 8 | Administrators may submit for every loader; users only for loaders granted to them. | `authorization_service.py` |
 | 9 | Re-submitting data for a date+shift that already has values is a **correction**: the summary shows *old → new* and Confirm replaces (never adds). Alternatives: reject, or require admin approval. | `CORRECTION_POLICY` |
 | 10 | When no explicit month→tab mapping exists, a tab is auto-selected only if **exactly one** tab title contains the loader number, the month and the year (e.g. `Loader 11 nov 2026`, `Oct loader 08 2026`). Tabs like `Sept 2026` or `Loader 12` need `/set_worksheet`. The chosen tab is always shown before confirmation. | `WORKSHEET_AUTO_DETECT` |
-| 11 | Worksheets are **never created** by the bot. A missing tab or date row is reported as an error. | — |
+| 11 | Worksheets are **never created** by the bot. A month tab without a loader number (`Nov 2026`) may hold one table per loader; each table must be titled "Loader NN …". A missing tab or date row is reported as an error. | — |
 | 12 | Reports from group chats are off by default (`ALLOW_GROUP_SUBMISSIONS`); when enabled, only groups trusted with `/trust_group` count, and every sender still needs per-loader access. | `ALLOW_GROUP_SUBMISSIONS` |
 
 ---
@@ -122,7 +122,7 @@ backend/
 │   ├── schemas/report.py, telegram.py, sheets.py
 │   └── core/config.py, security.py, logging.py
 ├── scripts/set_webhook.py          register / inspect / delete the webhook
-├── tests/                          174 tests, external APIs faked
+├── tests/                          189 tests, external APIs faked
 ├── deploy/Caddyfile                HTTPS reverse proxy (EC2)
 ├── Dockerfile, docker-compose.yml, .env.example, requirements*.txt
 ```
@@ -221,6 +221,24 @@ separately while it is written. Without loader numbers, a tab counts only if its
 that already uses a different spreadsheet is never moved — the reply lists it instead. If a report
 names a loader that is not registered but its tab is in a spreadsheet the report already uses, the
 summary says so.
+
+**One tab with a separate table per loader** (e.g. tab `Loader Report nov 2026` holding the tables
+*Loader 11 Whatsapp*, *Loader 01 Whatsapp*, *Loader 05 Whatsapp*, side by side or one under another):
+
+* Give each table a title above its header row that contains **"Loader" and its number**
+  (`Loader 05 Whatsapp`, `Loader 05 – November 2026`). Each table needs its own *Date* column.
+* Name the tab for the month without a loader number (`Nov 2026`, `Loader Report nov 2026`). With no
+  `/set_worksheet` mapping, that tab is used for every loader that has no tab of its own for the month,
+  and only if it is the only such tab. You can also map it explicitly: `/set_worksheet 5 2026 11 "Loader Report nov 2026"`.
+* Register the spreadsheet for the loaders: `/set_sheet 1 5 11 <URL>`.
+* The bot finds each table by its "Date" header, takes the loader from the title, and reads, matches
+  and writes **only inside that table**. Another loader's rows are never matched or written. A loader
+  without a titled table in a shared tab is blocked ("none titled 'Loader 05'"), and so is a title used
+  twice. A tab with a single table still works without a title, unless the title names a different
+  loader (e.g. a tab copied from another loader).
+* `/check_sheet 5 2026 11` shows which table was picked (title, rows, columns) and its columns.
+* The bot reads rows 1–400 and columns A–BZ of a tab (`SHEET_READ_MAX_ROWS`, `SHEET_READ_LAST_COLUMN`),
+  enough for three tables side by side or stacked.
 
 ### Commands
 
@@ -397,7 +415,7 @@ Tables are created at startup (`create_all`).
 
 ## 11. Testing
 
-`pytest` runs 174 tests with fake Telegram and in-memory Google Sheets: parser variants (shifts,
+`pytest` runs 189 tests with fake Telegram and in-memory Google Sheets: parser variants (shifts,
 dates, Nil, PC, duplicates), totals validation, header detection (single/two-tier/merged/moved
 columns/not row 1), date-row matching (serials and text), column mapping, averages and totals,
 preservation of other cells and formulas, worksheet routing, authorisation per loader, corrections

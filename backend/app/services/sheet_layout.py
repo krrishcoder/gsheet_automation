@@ -17,6 +17,7 @@ from enum import Enum
 from app.schemas.sheets import CellValue, CellWrite, SheetGrid
 from app.services.calculations import RowComputation, ShiftValues
 from app.services.report_parser import parse_date_value
+from app.services.worksheet_service import loader_number_in_title
 
 
 class Col(str, Enum):
@@ -140,12 +141,15 @@ def _is_group_label(label: str) -> bool:
     return (_shift_of(label) is not None or bool(_TOTAL_RE.search(label))) and not _METRIC_RE.search(label)
 
 
+_DATE_HEADER_WORDS = frozenset({"date", "dates", "date day", "day date"})
+
+
 def _find_date_header(grid: SheetGrid, scan_rows: int, date_col: int | None) -> tuple[int, int]:
     last = min(grid.last_row, grid.start_row + scan_rows - 1)
     for row in range(grid.start_row, last + 1):
         cols = [date_col] if date_col else range(grid.start_col, grid.last_col + 1)
         for col in cols:
-            if normalize_label(grid.label(row, col)) in {"date", "dates", "date day", "day date"}:
+            if normalize_label(grid.label(row, col)) in _DATE_HEADER_WORDS:
                 return row, col
     raise SheetLayoutError(
         "HEADER_NOT_FOUND", f"No 'Date' header cell found in the first {scan_rows} rows of '{grid.title}'"
@@ -264,6 +268,127 @@ def detect_layout(
         detected=True,
         deviations=deviations,
     )
+
+
+# --- Several tables in one tab -------------------------------------------------------------------
+
+_TITLE_ROWS_ABOVE = 4  # title + group-header rows that may sit above a table's "Date" cell
+_SAME_BAND_ROWS = 3  # "Date" cells this close vertically belong to side-by-side tables
+
+
+@dataclass(frozen=True)
+class TableRegion:
+    """One table in a tab; bounds are absolute and inclusive."""
+
+    date_row: int
+    date_col: int
+    first_row: int
+    last_row: int
+    first_col: int
+    last_col: int
+    loader_number: int | None  # from a title such as "Loader 05 – November 2026"
+    title: str | None
+
+    def describe(self) -> str:
+        where = f"rows {self.first_row}–{self.last_row}, columns {column_letter(self.first_col)}–{column_letter(self.last_col)}"
+        return f"'{self.title}' ({where})" if self.title else where
+
+
+def find_tables(grid: SheetGrid) -> list[TableRegion]:
+    """Every table in the tab, found by its "Date" header cell.
+
+    A table reaches to the column before the next table on its right (side by side) and to the
+    row before the next table below it (stacked). Its loader is the one named by a "Loader NN"
+    title in the few rows above its header, within its own columns.
+    """
+    anchors: list[tuple[int, int]] = []
+    for row in range(grid.start_row, grid.last_row + 1):
+        for col in range(grid.start_col, grid.last_col + 1):
+            if normalize_label(grid.cell(row, col).text) not in _DATE_HEADER_WORDS:
+                continue
+            # a two-tier header may repeat "Date" in the row below: same table
+            if not any(c == col and 0 < row - r <= _SAME_BAND_ROWS for r, c in anchors):
+                anchors.append((row, col))
+
+    tables: list[TableRegion] = []
+    for row, col in anchors:
+        right = [c for r, c in anchors if c > col and abs(r - row) <= _SAME_BAND_ROWS]
+        last_col = min(right) - 1 if right else grid.last_col
+        below = [r for r, c in anchors if r > row + _SAME_BAND_ROWS and col <= c <= last_col]
+        last_row = min(below) - 1 if below else grid.last_row
+        first_row = max(grid.start_row, row - _TITLE_ROWS_ABOVE)
+
+        numbers: dict[int, str] = {}
+        for r in range(first_row, row):
+            for c in range(col, last_col + 1):
+                text = grid.label(r, c)
+                number = loader_number_in_title(text) if text else None
+                if number is not None:
+                    numbers.setdefault(number, text.strip())
+        loader, title = (next(iter(numbers.items())) if len(numbers) == 1 else (None, None))
+        tables.append(TableRegion(row, col, first_row, last_row, col, last_col, loader, title))
+    return tables
+
+
+def locate_table(
+    grid: SheetGrid,
+    loader_number: int,
+    configured: dict[str, str],
+    *,
+    detection: bool = True,
+    strict: bool = True,
+    scan_rows: int = 20,
+    require_title: bool = False,
+) -> tuple[SheetGrid, SheetLayout, TableRegion | None]:
+    """The part of the tab that belongs to this loader, with its column layout.
+
+    * One table in the tab: the whole tab is the loader's (as before), unless its title names a
+      different loader, or ``require_title`` is set (a month tab shared by all loaders) and the
+      title does not name this loader.
+    * Several tables: exactly one must be titled for this loader. Callers must use the returned
+      subgrid for row matching, so another loader's rows can never be matched or written.
+    """
+    tables = find_tables(grid)
+    if len(tables) <= 1:
+        table = tables[0] if tables else None
+        if table and table.loader_number not in (None, loader_number):
+            raise SheetLayoutError(
+                "TABLE_FOR_OTHER_LOADER",
+                f"The table in '{grid.title}' is titled for Loader {table.loader_number:02d}, not Loader {loader_number:02d}",
+            )
+        if require_title and (table is None or table.loader_number != loader_number):
+            raise SheetLayoutError(
+                "TABLE_NOT_FOUND",
+                f"'{grid.title}' has no table titled 'Loader {loader_number:02d}'. "
+                f"Put a title such as 'Loader {loader_number:02d} – <month>' above its header row",
+            )
+        layout = detect_layout(grid, configured, detection=detection, strict=strict, scan_rows=scan_rows)
+        return grid, layout, table
+
+    matches = [t for t in tables if t.loader_number == loader_number]
+    if len(matches) != 1:
+        titles = ", ".join(f"'{t.title}'" for t in tables if t.title) or "none"
+        if matches:
+            raise SheetLayoutError(
+                "TABLE_AMBIGUOUS",
+                f"'{grid.title}' has {len(matches)} tables titled for Loader {loader_number:02d}: "
+                + "; ".join(t.describe() for t in matches),
+            )
+        raise SheetLayoutError(
+            "TABLE_NOT_FOUND",
+            f"'{grid.title}' has {len(tables)} tables but none titled 'Loader {loader_number:02d}' "
+            f"(titles found: {titles}). Put a title such as 'Loader {loader_number:02d} – <month>' above its header row",
+        )
+    table = matches[0]
+    sub = grid.subgrid(table.first_row, table.last_row, table.first_col, table.last_col)
+    # Configured letters describe a table whose Date column is the configured DATE column;
+    # shift them so the fallback mapping also fits tables placed further right.
+    offset = table.date_col - column_index(configured["DATE"])
+    shifted = {key: column_letter(column_index(letter) + offset) for key, letter in configured.items()}
+    if min(column_index(letter) for letter in shifted.values()) < 1:
+        shifted = dict(configured)
+    layout = detect_layout(sub, shifted, detection=detection, strict=strict, scan_rows=scan_rows)
+    return sub, layout, table
 
 
 # --- Cell value conversion ------------------------------------------------------------------

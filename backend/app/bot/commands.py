@@ -22,7 +22,7 @@ from app.database.repositories import (
 from app.schemas.telegram import TgMessage
 from app.services.google_sheets_service import SheetsError
 from app.services.loader_service import ConfigurationError, LoaderService, extract_spreadsheet_id, parse_loader_number
-from app.services.sheet_layout import Col, SheetLayoutError, column_letter, date_rows_summary, detect_layout
+from app.services.sheet_layout import Col, SheetLayoutError, column_letter, date_rows_summary, find_tables, locate_table
 from app.services.worksheet_service import (
     MONTH_NAMES,
     WorksheetResolutionError,
@@ -458,20 +458,26 @@ def cmd_check_sheet(ctx: CommandContext) -> str:
             auto_detect=settings.worksheet_auto_detect,
         )
         how = "auto-detected" if resolution.auto_detected else "configured"
-        lines.append(f"Worksheet: '{h(resolution.worksheet_name)}' ({how})")
-        grid = sheets.read_grid(
+        shared = " — month tab shared by loaders" if resolution.shared else ""
+        lines.append(f"Worksheet: '{h(resolution.worksheet_name)}' ({how}{shared})")
+        tab = sheets.read_grid(
             spreadsheet_id, resolution.worksheet_name, last_row=settings.sheet_read_max_rows, last_col=settings.sheet_read_last_column
         )
-        layout = detect_layout(
-            grid,
+        grid, layout, table = locate_table(
+            tab,
+            number,
             settings.sheet_column_map,
             detection=settings.sheet_header_detection,
             strict=settings.sheet_header_strict,
             scan_rows=settings.sheet_header_scan_rows,
+            require_title=resolution.shared,
         )
     except (SheetsError, WorksheetResolutionError, SheetLayoutError) as exc:
         lines.append(f"❌ {h(exc.message)}")
         return "\n".join(lines)
+    tables = find_tables(tab)
+    if len(tables) > 1 and table is not None:
+        lines.append(f"Table: {h(table.describe())} (1 of {len(tables)} tables in this tab)")
     lines.append(f"Header row(s): {', '.join(map(str, layout.header_rows))} · data from row {layout.data_start_row}")
     lines.append(
         "Columns: " + ", ".join(f"{c.value}={column_letter(layout.columns[c])}" for c in Col if c in layout.columns)

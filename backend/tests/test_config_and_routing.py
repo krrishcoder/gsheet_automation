@@ -46,7 +46,15 @@ def test_auto_detection_on_screenshot_tabs(loader, month, expected):
     assert res.worksheet_name == expected and res.auto_detected
 
 
-@pytest.mark.parametrize("loader, month", [(12, 11), (5, 11), (11, 12), (12, 9)])
+def test_month_only_tab_is_offered_as_a_shared_tab():
+    # "Sept 2026" names no loader: it may only be used if it holds a table titled for the loader,
+    # which the sheet layout step enforces (see test_shared_month_tab_* in test_end_to_end.py).
+    res = resolve(12, 2026, 9)
+    assert (res.worksheet_name, res.auto_detected, res.shared) == ("Sept 2026", True, True)
+    assert not resolve(11, 2026, 11).shared
+
+
+@pytest.mark.parametrize("loader, month", [(12, 11), (5, 11), (11, 12)])
 def test_auto_detection_refuses_to_guess(loader, month):
     with pytest.raises(WorksheetResolutionError) as exc:
         resolve(loader, 2026, month)

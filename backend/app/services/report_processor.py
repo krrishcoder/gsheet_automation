@@ -37,6 +37,7 @@ from app.database.repositories import LoaderRepository, ReportRepository, ShiftE
 from app.schemas.report import IssueSeverity, ValidationIssue
 from app.services.authorization_service import AuthorizationService
 from app.services.calculations import ShiftValues, compute_row_update
+from app.schemas.sheets import SheetGrid
 from app.services.google_sheets_service import SheetsClient, SheetsError, SpreadsheetInfo
 from app.services.locks import LockManager, LockTimeout
 from app.services.sheet_layout import (
@@ -45,8 +46,8 @@ from app.services.sheet_layout import (
     SheetLayoutError,
     build_cell_writes,
     column_letter,
-    detect_layout,
     find_date_row,
+    locate_table,
     read_row_state,
     shift_columns,
 )
@@ -102,6 +103,7 @@ class _ApplyInput:
     preview_planned: ShiftValues
     is_correction: bool
     actor: int | None
+    shared_tab: bool = False
 
 
 class ReportProcessor:
@@ -121,22 +123,29 @@ class ReportProcessor:
 
     # --- Sheet access helpers ---------------------------------------------------------------
 
-    def _load_row(self, spreadsheet_id: str, worksheet: str, report_date: date) -> tuple[Any, SheetLayout, int]:
-        grid = self.sheets.read_grid(
+    def _read_tab(self, spreadsheet_id: str, worksheet: str) -> SheetGrid:
+        return self.sheets.read_grid(
             spreadsheet_id,
             worksheet,
             last_row=self.settings.sheet_read_max_rows,
             last_col=self.settings.sheet_read_last_column,
         )
-        layout = detect_layout(
+
+    def _load_row(
+        self, grid: SheetGrid, loader_number: int, report_date: date, *, require_title: bool = False
+    ) -> tuple[SheetGrid, SheetLayout, int]:
+        """This loader's table within the tab (a tab may hold several loaders' tables) and its date row.
+        Everything after this works on the returned table grid only."""
+        table, layout, _ = locate_table(
             grid,
+            loader_number,
             self.settings.sheet_column_map,
             detection=self.settings.sheet_header_detection,
             strict=self.settings.sheet_header_strict,
             scan_rows=self.settings.sheet_header_scan_rows,
+            require_title=require_title,
         )
-        row = find_date_row(grid, layout, report_date)
-        return grid, layout, row
+        return table, layout, find_date_row(table, layout, report_date)
 
     # --- Preview ------------------------------------------------------------------------------
 
@@ -181,8 +190,10 @@ class ReportProcessor:
                 inputs.append(inp)
 
         info_cache: dict[str, SpreadsheetInfo | SheetsError] = {}
+        grid_cache: dict[tuple[str, str], SheetGrid] = {}  # one read per tab, even if it holds several loaders
         outcomes = {
-            inp.record_id: self._preview_one(inp, report_date, shift, submitter_is_admin, info_cache) for inp in inputs
+            inp.record_id: self._preview_one(inp, report_date, shift, submitter_is_admin, info_cache, grid_cache)
+            for inp in inputs
         }
         self._hint_unregistered_tabs(inputs, outcomes, info_cache, report_date)
 
@@ -257,6 +268,7 @@ class ReportProcessor:
         shift: int,
         submitter_is_admin: bool,
         info_cache: dict[str, SpreadsheetInfo | SheetsError],
+        grid_cache: dict[tuple[str, str], SheetGrid],
     ) -> PreviewOutcome:
         n = inp.loader_number
         if inp.blocking:
@@ -285,7 +297,10 @@ class ReportProcessor:
                 available_titles=info.worksheet_titles,
                 auto_detect=self.settings.worksheet_auto_detect,
             )
-            grid, layout, row = self._load_row(inp.spreadsheet_id, resolution.worksheet_name, report_date)
+            key = (inp.spreadsheet_id, resolution.worksheet_name)
+            if key not in grid_cache:
+                grid_cache[key] = self._read_tab(*key)
+            grid, layout, row = self._load_row(grid_cache[key], n, report_date, require_title=resolution.shared)
             state = read_row_state(grid, layout, row)
         except (SheetsError, WorksheetResolutionError, SheetLayoutError) as exc:
             return PreviewOutcome(RecordStatus.BLOCKED, exc.code, exc.message)
@@ -311,7 +326,11 @@ class ReportProcessor:
             "worksheet_name": resolution.worksheet_name,
             "worksheet_auto_detected": resolution.auto_detected,
             "sheet_row": row,
-            "preview_values": {"before": computation.before.to_dict(), "planned": computation.after.to_dict()},
+            "preview_values": {
+                "before": computation.before.to_dict(),
+                "planned": computation.after.to_dict(),
+                "shared_tab": resolution.shared,
+            },
         }
         if not computation.changed:
             return PreviewOutcome(
@@ -373,6 +392,7 @@ class ReportProcessor:
                 preview_before=ShiftValues.from_dict(preview.get("before")),
                 preview_planned=ShiftValues.from_dict(preview.get("planned")),
                 is_correction=record.is_correction,
+                shared_tab=bool(preview.get("shared_tab")),
                 actor=report.confirmed_by,
             )
 
@@ -394,7 +414,12 @@ class ReportProcessor:
             return self._finish_with(inp.record_id, RecordStatus.FAILED, "CELL_VALUE_INVALID", str(exc))
 
     def _apply_locked(self, inp: _ApplyInput) -> RecordStatus:
-        grid, layout, row = self._load_row(inp.spreadsheet_id, inp.worksheet_name, inp.report_date)
+        grid, layout, row = self._load_row(
+            self._read_tab(inp.spreadsheet_id, inp.worksheet_name),
+            inp.loader_number,
+            inp.report_date,
+            require_title=inp.shared_tab,
+        )
         if row != inp.sheet_row:
             return self._finish_with(
                 inp.record_id,

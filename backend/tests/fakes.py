@@ -10,7 +10,7 @@ from typing import Any
 
 from app.schemas.sheets import CellValue, CellWrite, MergedRange, SheetGrid
 from app.services.google_sheets_service import SheetsError, SpreadsheetInfo
-from app.services.sheet_layout import column_index
+from app.services.sheet_layout import column_index, column_letter
 
 
 class FakeTelegram:
@@ -94,6 +94,7 @@ class FakeSheets:
         self.writes: list[tuple[str, str, list[CellWrite]]] = []
         self.failures: dict[str, list[Exception]] = {}
         self.read_delay = 0.0
+        self.reads: list[tuple[str, str]] = []
         self._lock = threading.Lock()
 
     def add_spreadsheet(self, spreadsheet_id: str, title: str = "Loader sheet") -> None:
@@ -127,6 +128,7 @@ class FakeSheets:
 
     def read_grid(self, spreadsheet_id: str, worksheet: str, *, last_row: int, last_col: str) -> SheetGrid:
         self._maybe_fail("read")
+        self.reads.append((spreadsheet_id, worksheet))
         with self._lock:
             doc = self._spreadsheet(spreadsheet_id)
             if worksheet not in doc["tabs"]:
@@ -170,23 +172,48 @@ def build_month_sheet(
     loader_number: int = 11,
     text_dates: bool = False,
 ) -> tuple[FakeWorksheet, dict[date, int]]:
-    """Title row, header row(s), then one row per day. Returns the sheet and {date: row}."""
+    """A tab holding one loader's table at B1 (as the real per-loader tabs). Returns the sheet and {date: row}."""
     ws = FakeWorksheet(title)
-    ws.set("B1", f"Loader {loader_number:02d} – {date(year, month, 1):%B %Y}")
-    ws.merge("B1", "N1")
+    rows = add_month_table(ws, year, month, two_tier=two_tier, loader_number=loader_number, text_dates=text_dates)
+    return ws, rows
+
+
+def add_month_table(
+    ws: FakeWorksheet,
+    year: int,
+    month: int,
+    *,
+    top: int = 1,
+    left: int = 2,
+    two_tier: bool = True,
+    loader_number: int = 11,
+    title: str | None = "default",
+    text_dates: bool = False,
+) -> dict[date, int]:
+    """Write one loader's table (title row, header row(s), one row per day) with its Date column at
+    column ``left`` and its title at row ``top``. Returns {date: row}."""
+
+    def at(offset: int, row: int) -> str:
+        return f"{column_letter(left + offset)}{row}"
+
+    if title:
+        text = f"Loader {loader_number:02d} – {date(year, month, 1):%B %Y}" if title == "default" else title
+        ws.set(at(0, top), text)
+        ws.merge(at(0, top), at(12, top))
+    head = top + 1
     if two_tier:
-        ws.set("B2", "Date")
-        ws.merge("B2", "B3")
-        ws.set("C2", "HSD Fuel (L)")
-        ws.merge("C2", "C3")
-        for start, end, label in (("D", "F", "1st Shift"), ("G", "I", "2nd Shift"), ("J", "L", "3rd Shift")):
-            ws.set(f"{start}2", label)
-            ws.merge(f"{start}2", f"{end}2")
-        ws.set("M2", "Day Total")
-        ws.merge("M2", "N2")
-        for col_letters, sub in zip("DEFGHIJKLMN", ["Trips", "Weight (MT)", "Avg (MT)"] * 3 + ["Weight (MT)", "Trips"]):
-            ws.set(f"{col_letters}3", sub)
-        first_data = 4
+        ws.set(at(0, head), "Date")
+        ws.merge(at(0, head), at(0, head + 1))
+        ws.set(at(1, head), "HSD Fuel (L)")
+        ws.merge(at(1, head), at(1, head + 1))
+        for offset, label in ((2, "1st Shift"), (5, "2nd Shift"), (8, "3rd Shift")):
+            ws.set(at(offset, head), label)
+            ws.merge(at(offset, head), at(offset + 2, head))
+        ws.set(at(11, head), "Day Total")
+        ws.merge(at(11, head), at(12, head))
+        for offset, sub in zip(range(2, 13), ["Trips", "Weight (MT)", "Avg (MT)"] * 3 + ["Weight (MT)", "Trips"]):
+            ws.set(at(offset, head + 1), sub)
+        first_data = head + 2
     else:
         headers = [
             "Date", "HSD Fuel (L)",
@@ -195,18 +222,18 @@ def build_month_sheet(
             "3rd Shift Trips", "3rd Shift Weight (MT)", "3rd Shift Avg (MT)",
             "Day Total Weight (MT)", "Day Total Trips",
         ]
-        for col_letters, header in zip("BCDEFGHIJKLMN", headers):
-            ws.set(f"{col_letters}2", header)
-        first_data = 3
+        for offset, header in enumerate(headers):
+            ws.set(at(offset, head), header)
+        first_data = head + 1
     rows: dict[date, int] = {}
     d = date(year, month, 1)
     row = first_data
     while d.month == month:
         if text_dates:
-            ws.set(f"B{row}", d.strftime("%d-%m-%Y"))
+            ws.set(at(0, row), d.strftime("%d-%m-%Y"))
         else:
-            ws.set(f"B{row}", serial(d), formatted=d.strftime("%d-%m-%Y"))
+            ws.set(at(0, row), serial(d), formatted=d.strftime("%d-%m-%Y"))
         rows[d] = row
         d += timedelta(days=1)
         row += 1
-    return ws, rows
+    return rows

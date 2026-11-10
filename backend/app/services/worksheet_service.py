@@ -44,6 +44,7 @@ class WorksheetResolutionError(Exception):
 class WorksheetResolution:
     worksheet_name: str
     auto_detected: bool
+    shared: bool = False  # a month tab with no loader number: the loader's table must carry its title
 
 
 def parse_month(token: str) -> int | None:
@@ -96,6 +97,12 @@ def title_matches(title: str, *, loader_number: int, year: int, month: int) -> b
     return numbers == {loader_number} and years == {year} and months == {month}
 
 
+def is_shared_month_tab(title: str, *, year: int, month: int) -> bool:
+    """A tab named only for the month (no loader number), e.g. "Nov 2026", "CHP November 2026"."""
+    numbers, years, months = _title_tokens(title)
+    return not numbers and years == {year} and months == {month}
+
+
 def _norm(name: str) -> str:
     return re.sub(r"\s+", " ", name).strip().lower()
 
@@ -125,8 +132,13 @@ def resolve_worksheet(
             "WORKSHEET_NOT_CONFIGURED", f"No worksheet configured for {period}. Admin: {setup}"
         )
     candidates = [t for t in available_titles if title_matches(t, loader_number=loader_number, year=year, month=month)]
+    shared = False
+    if not candidates:
+        # One tab for the month holding every loader's table, e.g. "Nov 2026" or "CHP nov 2026".
+        candidates = [t for t in available_titles if is_shared_month_tab(t, year=year, month=month)]
+        shared = True
     if len(candidates) == 1:
-        return WorksheetResolution(candidates[0], auto_detected=True)
+        return WorksheetResolution(candidates[0], auto_detected=True, shared=shared)
     if not candidates:
         raise WorksheetResolutionError(
             "WORKSHEET_NOT_CONFIGURED",
