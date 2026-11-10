@@ -438,6 +438,7 @@ def locate_table(
 _OPEN_RE = re.compile(r"\bopen")
 _CLOSE_RE = re.compile(r"\bclos")
 _HM_RE = re.compile(r"\b(?:hm|hmr|hour ?meter)\b")
+_SPEED_RE = re.compile(r"\bspeed\b")
 
 
 def _card_key(label: str) -> str | None:
@@ -457,6 +458,11 @@ def _hm_key(label: str) -> str | None:
     if shift and _CLOSE_RE.search(label):
         return f"close{shift}"
     return None
+
+
+def _speed_key(label: str) -> str | None:
+    shift = _shift_of(label)
+    return f"speed{shift}" if shift and _SPEED_RE.search(label) else None
 
 
 def _log_key(label: str) -> str | None:
@@ -502,6 +508,13 @@ BLOCK_KINDS = {
         ("hsd", "hm"),
         ("avg",),
         "'Loader {n} hsd avg' with the columns Date, hsd, hm, avg",
+    ),
+    "speed": BlockKind(
+        "speed block",
+        _speed_key,
+        ("speed1", "speed2", "speed3"),
+        (),
+        "'Loader {n} Per trip Speed' with the columns Date, 1st shift speed, 2nd shift speed, 3rd shift speed",
     ),
 }
 

@@ -64,6 +64,7 @@ def make_settings(tmp_path, **overrides) -> Settings:
         job_retry_base_seconds=0.01,
         sheet_lock_wait_seconds=20,
         log_format="text",
+        summary_after_update=False,  # on in production; tests/test_summary.py turns it on
     )
     values.update(overrides)
     return Settings(**values)

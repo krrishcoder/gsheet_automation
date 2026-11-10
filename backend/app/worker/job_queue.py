@@ -22,6 +22,7 @@ class JobType:
     PROCESS_UPDATE = "process_update"
     APPLY_REPORT = "apply_report"
     APPLY_CARD = "apply_card"
+    SEND_SUMMARY = "send_summary"
 
 
 class RetryJob(Exception):

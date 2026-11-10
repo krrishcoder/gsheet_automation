@@ -9,13 +9,15 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from app.bot.card_handler import CARD_FORMAT_HELP
+from app.bot.summary_handler import summary_message
 from app.bot.confirmation_handler import approve_correction, reject_correction
 from app.bot.formatting import fmt_date, h, loader_label, render_report_brief, render_result
 from app.container import AppContainer
-from app.database.models import RecordStatus, ReportStatus, TrustedChat, User, UserRole
+from app.database.models import RecordStatus, ReportStatus, SummaryRecipient, TrustedChat, User, UserRole
 from app.database.repositories import (
     LoaderRepository,
     ReportRepository,
+    SummaryRecipientRepository,
     TrustedChatRepository,
     UserRepository,
     audit,
@@ -23,6 +25,7 @@ from app.database.repositories import (
 from app.schemas.telegram import TgMessage
 from app.services.google_sheets_service import SheetsError
 from app.services.loader_service import ConfigurationError, LoaderService, extract_spreadsheet_id, parse_loader_number
+from app.services.summary_service import normalize_phone
 from app.services.sheet_layout import (
     Col,
     SheetLayoutError,
@@ -63,7 +66,7 @@ class CommandContext:
 
 @dataclass(frozen=True)
 class Command:
-    handler: Callable[[CommandContext], str]
+    handler: Callable[[CommandContext], "str | tuple[str, dict]"]  # text, or (text, reply markup)
     usage: str
     description: str
     admin_only: bool = False
@@ -127,7 +130,10 @@ def handle_command(container: AppContainer, update_id: int, message: TgMessage) 
             reply = f"⚠️ {h(exc)}\nUsage: <code>{h(cmd.usage)}</code>"
         except ConfigurationError as exc:
             reply = f"⚠️ {h(exc)}"
-    container.telegram.send_message(message.chat.id, reply, reply_to_message_id=reply_to)
+    markup = None
+    if isinstance(reply, tuple):
+        reply, markup = reply
+    container.telegram.send_message(message.chat.id, reply, reply_markup=markup, reply_to_message_id=reply_to)
 
 
 # --- Argument helpers ---------------------------------------------------------------------------
@@ -640,6 +646,86 @@ def cmd_list_groups(ctx: CommandContext) -> str:
         if not chats:
             return "No trusted groups."
         return "<b>Trusted groups</b>\n" + "\n".join(f"• <code>{c.chat_id}</code> {h(c.title or '')}" for c in chats)
+
+
+# --- Month summary for the boss ------------------------------------------------------------------
+
+
+@command("summary", "/summary [loader …] [year month]", "Month summary with a 'send on WhatsApp' button")
+def cmd_summary(ctx: CommandContext):
+    numbers, rest = [], list(ctx.args)
+    while rest and re.fullmatch(r"\d{1,3}", rest[0]):
+        numbers.append(parse_loader_number(rest.pop(0)))
+    today = ctx.container.today()
+    year, month = _year_month(rest, 0) if rest else (today.year, today.month)
+    with ctx.container.db.session() as session:
+        if ctx.is_admin:
+            allowed = [l.loader_number for l in LoaderRepository(session).list_all() if l.is_active]
+        else:
+            allowed = [l.loader_number for l in UserRepository(session).get_by_telegram_id(ctx.actor_id).loaders if l.is_active]
+    loaders = [n for n in numbers if n in allowed] if numbers else allowed
+    if not loaders:
+        return "No loaders to summarise." + (" (You have no access to those loaders.)" if numbers else "")
+    try:
+        built = summary_message(ctx.container, loaders, year, month)
+    except SheetsError as exc:
+        return f"⚠️ {h(exc.message)}"
+    return built or "Nothing to summarise yet."
+
+
+def _phone_and_rest(args: list[str]) -> tuple[str, list[str]]:
+    """A number may be typed with spaces ("+91 98765 43210"); the words after it are the name."""
+    count = 0
+    while count < len(args) and re.fullmatch(r"\+?[\d()\-]+", args[count]):
+        count += 1
+    if count == 0:
+        raise UsageError("WhatsApp number is missing")
+    raw = " ".join(args[:count])
+    phone = normalize_phone(raw)
+    if phone is None:
+        raise UsageError(f"'{raw}' is not a phone number (e.g. 9876543210 or +91 98765 43210)")
+    return phone, args[count:]
+
+
+@command("boss_add", "/boss_add <WhatsApp number> [name]", "Add a WhatsApp number for the summary button", admin_only=True)
+def cmd_boss_add(ctx: CommandContext) -> str:
+    phone, rest = _phone_and_rest(ctx.args)
+    name = " ".join(rest).strip() or None
+    with ctx.container.db.session() as session:
+        repo = SummaryRecipientRepository(session)
+        recipient = repo.get(phone)
+        if recipient is None:
+            session.add(SummaryRecipient(phone=phone, name=name, added_by=ctx.actor_id))
+        elif name:
+            recipient.name = name
+        audit(session, "summary_recipient_added", actor=ctx.actor_id, entity_type="summary_recipient", entity_id=phone)
+    return f"✅ The month summary will offer a button to send it to {h(name or '')} <code>+{phone}</code> on WhatsApp."
+
+
+@command("boss_remove", "/boss_remove <WhatsApp number>", "Remove a summary WhatsApp number", admin_only=True)
+def cmd_boss_remove(ctx: CommandContext) -> str:
+    phone, _ = _phone_and_rest(ctx.args)
+    with ctx.container.db.session() as session:
+        recipient = SummaryRecipientRepository(session).get(phone)
+        if recipient is None:
+            return f"<code>+{phone}</code> is not in the list."
+        session.delete(recipient)
+        audit(session, "summary_recipient_removed", actor=ctx.actor_id, entity_type="summary_recipient", entity_id=phone)
+    return f"✅ Removed <code>+{phone}</code>."
+
+
+@command("boss_list", "/boss_list", "WhatsApp numbers for the summary button", admin_only=True)
+def cmd_boss_list(ctx: CommandContext) -> str:
+    with ctx.container.db.session() as session:
+        recipients = SummaryRecipientRepository(session).list_all()
+        if not recipients:
+            return "No WhatsApp numbers yet — the summary gets a plain 'Share on WhatsApp' button. Add one: /boss_add &lt;number&gt; &lt;name&gt;"
+        auto = "on" if ctx.container.settings.summary_after_update else "off (SUMMARY_AFTER_UPDATE=false)"
+        return (
+            "<b>Summary goes to</b>\n"
+            + "\n".join(f"• {h(r.name or '')} <code>+{r.phone}</code>" for r in recipients)
+            + f"\n\nSent after every sheet update: {auto}"
+        )
 
 
 # --- History, retries, corrections (admin) --------------------------------------------------------

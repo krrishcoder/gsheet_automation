@@ -122,7 +122,7 @@ backend/
 │   ├── schemas/report.py, telegram.py, sheets.py
 │   └── core/config.py, security.py, logging.py
 ├── scripts/set_webhook.py          register / inspect / delete the webhook
-├── tests/                          245 tests, external APIs faked
+├── tests/                          256 tests, external APIs faked
 ├── deploy/Caddyfile                HTTPS reverse proxy (EC2)
 ├── Dockerfile, docker-compose.yml, .env.example, requirements*.txt
 ```
@@ -284,12 +284,48 @@ H 132.4 4276.2
 * The older long form (`CARD L11` / `Date: 06-11-2026` / `1st: 36` / `HSD: 190 + 154.98`) still
   works; its HSD line has no HM, so it only adds to HSD Fuel.
 
+### Month summary for the boss (WhatsApp, one tap)
+
+After every sheet update (a confirmed report or card message) the bot sends the person who
+updated it a **month summary** with a button. Tapping the button opens WhatsApp with the summary
+already typed to the boss; pressing **Send** sends it from your own number. (A fully automatic
+send needs the WhatsApp Business API; iPhones cannot send SMS by themselves.)
+
+```
+*Loader summary · November 2026*
+Updated: 09-11 3rd Shift
+
+*Loader 11* (till 10-11)
+Trips: 969
+Quantity: 32,349.63 MT
+Diesel avg: 16.146 L/h (last refill, HM 4276.2)
+Speed: 8.432 min/trip (10-11, 1st shift)
+Net operating profit: ₹78,868.07
+Profit with GST: ₹139,201.66
+```
+
+* Everything is read from the loader's month tab right after the update, as the sheet computes it:
+  trips and quantity from the shift table (the CHP report figures, month to date); **diesel avg**
+  = the latest refill's avg in *Loader NN hsd avg*; **speed** = the latest shift with a speed in
+  *Loader NN Per trip Speed* (0 and #DIV/0! are skipped); **profits** = the numbers next to
+  "Operating Profit (Pre-GST)" and "Profit With Gst" inside the loader's blocks. A figure a loader
+  does not have (e.g. no refill log) is left out.
+* The summary covers the loaders the update wrote (a report: all of them; a card message: that
+  loader).
+* `/boss_add <WhatsApp number> [name]` (admin) makes the button open that person's chat directly
+  ("📲 Send to Sharma ji on WhatsApp", one button per number); without a number the button lets
+  you pick the chat. `/boss_list`, `/boss_remove <number>`. A 10-digit number gets +91.
+* `/summary [loader …] [year month]` sends the summary on demand (users: their own loaders).
+* `SUMMARY_AFTER_UPDATE=false` turns the automatic summary off.
+
 ### Commands
 
 | Command | Who | Purpose |
 |---|---|---|
 | `/start`, `/help` | everyone | your Telegram ID, role and commands |
 | `/my_loaders` | user | loaders you may report for |
+| `/summary [loader …] [year month]` | user | month summary with a "send on WhatsApp" button |
+| `/boss_add <number> [name]`, `/boss_remove <number>`, `/boss_list` | admin | WhatsApp numbers the summary button opens |
 | `/card_format` | everyone | the short message for card trips, hour meter and diesel |
 | `/my_reports`, `/report <id>` | user | your recent reports, per-loader results |
 | `/set_sheet [loader …] <url>` | admin | register / change spreadsheet for one or more loaders; without numbers, for every "Loader NN" tab in the file (validates the URL, checks access, shows each loader's tab) |
@@ -460,7 +496,7 @@ Tables are created at startup (`create_all`).
 
 ## 11. Testing
 
-`pytest` runs 245 tests with fake Telegram and in-memory Google Sheets: parser variants (shifts,
+`pytest` runs 256 tests with fake Telegram and in-memory Google Sheets: parser variants (shifts,
 dates, Nil, PC, duplicates), totals validation, header detection (single/two-tier/merged/moved
 columns/not row 1), date-row matching (serials and text), column mapping, averages and totals,
 preservation of other cells and formulas, worksheet routing, authorisation per loader, corrections

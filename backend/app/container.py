@@ -13,6 +13,7 @@ from app.services.card_service import CardService
 from app.services.google_sheets_service import GoogleSheetsClient, SheetsClient
 from app.services.locks import LockManager
 from app.services.report_processor import ReportProcessor
+from app.services.summary_service import SummaryService
 from app.services.telegram_service import TelegramBotApi, TelegramClient
 
 
@@ -36,6 +37,7 @@ class AppContainer:
         )
         self.processor = ReportProcessor(db, sheets, self.locks, settings, self.auth)
         self.cards = CardService(db, sheets, self.locks, settings, self.auth)
+        self.summaries = SummaryService(db, sheets, settings)
         self._wake_listeners: list[Callable[[], None]] = []
 
     @classmethod

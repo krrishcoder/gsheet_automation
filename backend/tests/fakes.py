@@ -332,3 +332,37 @@ def add_refill_log(
             formula = f"={hsd_ref}/({hm_ref}-{column_letter(left + 3)}{row - 1})"
             ws.set((row, left + 4), _evaluate(ws, formula), formula=formula)
     return first
+
+
+def add_speed_block(ws: FakeWorksheet, *, top: int, left: int = 22, loader_number: int = 11, speeds: dict = None, year: int = 2026, month: int = 11) -> None:
+    """Like the real "Loader 11 Per trip Speed": Date, working hours and a speed per shift. Empty
+    days compute 0 (or #DIV/0!); ``speeds`` = {date: (1st, 2nd, 3rd)} with numbers or "#DIV/0!"."""
+    ws.set((top, left), f"Loader {loader_number:02d} Per trip Speed")
+    headers = ["Date", "1st Working hr", "2nd working hr", "3rd working hr", "1st shift speed", "2nd shift speed", "3rd Shift speed"]
+    for offset, header in enumerate(headers):
+        ws.set((top + 1, left + offset), header)
+    d, row = date(year, month, 1), top + 2
+    while d.month == month:
+        ws.set((row, left), serial(d), formatted=d.strftime("%d-%m-%Y"), formula="=U1")
+        for shift, value in enumerate((speeds or {}).get(d, (0, 0, 0)), start=1):
+            if value == "#DIV/0!":
+                ws.cells[(row, left + 3 + shift)] = CellValue(error="#DIV/0!", formula="=x")
+            else:
+                ws.set((row, left + 3 + shift), value, formatted=f"{value:.3f}" if value else "0", formula="=x")
+        d += timedelta(days=1)
+        row += 1
+
+
+def add_statement(ws: FakeWorksheet, *, top: int = 76, left: int = 4, operating_profit: float = 71514.61, profit_gst: float = 124606.06) -> None:
+    """The commercial statement under the card block (as in the real sheet: label, text, number)."""
+    def money(v: float) -> str:
+        return f"₹{v:,.2f}"
+
+    ws.set((top, left), "LOADER 11 — COMMERCIAL STATEMENT (CARD DETAILS)")
+    ws.set((top + 4, left), "Operating Profit (Pre-GST)")
+    ws.set((top + 4, left + 2), "Revenue − Fuel Expense")
+    ws.set((top + 4, left + 5), operating_profit, formatted=money(operating_profit), formula="=x")
+    ws.set((top + 7, left), "Operating Profit Margin")  # a percentage: must not be taken for the profit
+    ws.set((top + 7, left + 5), 0.2425, formatted="24.25%", formula="=x")
+    ws.set((top + 10, left + 4), "Profit With Gst")
+    ws.set((top + 10, left + 5), profit_gst, formatted=money(profit_gst), formula="=x")

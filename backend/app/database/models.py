@@ -411,6 +411,18 @@ class CardEntry(Base):
     __table_args__ = (Index("ix_card_entries_loader_date", "loader_number", "entry_date"),)
 
 
+class SummaryRecipient(Base):
+    """A WhatsApp number the month summary is offered for (a wa.me button per number)."""
+
+    __tablename__ = "summary_recipients"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    phone: Mapped[str] = mapped_column(String(20), unique=True)  # country code + number, digits only
+    name: Mapped[str | None] = mapped_column(String(64))
+    added_by: Mapped[int | None] = mapped_column(BigInteger)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+
+
 # --- Infrastructure -------------------------------------------------------------------------
 
 

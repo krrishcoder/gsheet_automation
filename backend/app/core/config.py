@@ -59,6 +59,8 @@ class Settings(BaseSettings):
     admin_telegram_ids: str = ""  # comma-separated Telegram user ids that are always administrators
     allow_group_submissions: bool = False
     confirmation_ttl_minutes: int = Field(default=120, ge=1)
+    # after each sheet update, send the month summary with a "send on WhatsApp" button
+    summary_after_update: bool = True
     max_webhook_body_bytes: int = 1_000_000
 
     # --- Database -------------------------------------------------------------------------

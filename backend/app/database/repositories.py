@@ -23,6 +23,7 @@ from app.database.models import (
     RecordStatus,
     ReportStatus,
     ShiftEntry,
+    SummaryRecipient,
     TelegramUpdate,
     TrustedChat,
     User,
@@ -269,6 +270,17 @@ class JobRepository:
 
     def has_dead(self) -> bool:
         return bool(self.session.scalar(select(func.count()).where(Job.status == JobStatus.DEAD)))
+
+
+class SummaryRecipientRepository:
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def list_all(self) -> list[SummaryRecipient]:
+        return list(self.session.scalars(select(SummaryRecipient).order_by(SummaryRecipient.id)))
+
+    def get(self, phone: str) -> SummaryRecipient | None:
+        return self.session.scalar(select(SummaryRecipient).where(SummaryRecipient.phone == phone))
 
 
 class CardRepository:

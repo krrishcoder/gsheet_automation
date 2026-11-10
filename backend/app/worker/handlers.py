@@ -5,11 +5,12 @@ from __future__ import annotations
 import logging
 
 from app.bot.card_handler import send_card_result
+from app.bot.summary_handler import queue_summary, report_note, send_summary_job
 from app.bot.dispatcher import dispatch_update
 from app.bot.formatting import render_result
 from app.container import AppContainer
-from app.database.models import RecordStatus, TelegramUpdate, UpdateStatus, utcnow
-from app.database.repositories import ReportRepository
+from app.database.models import CardStatus, RecordStatus, TelegramUpdate, UpdateStatus, utcnow
+from app.database.repositories import CardRepository, ReportRepository
 from app.schemas.telegram import TgUpdate
 from app.services.report_processor import IN_FLIGHT_STATUSES, TransientApplyError
 from app.services.retry import backoff_delay
@@ -70,6 +71,26 @@ def apply_report_job(container: AppContainer, job: ClaimedJob) -> None:
 
     container.processor.finalize_report(report_id)
     _send_result(container, report_id, only)
+    _queue_report_summary(container, report_id, set(record_ids))
+
+
+def _queue_report_summary(container: AppContainer, report_id: int, record_ids: set[int]) -> None:
+    """The month summary for the loaders this run actually wrote."""
+    with container.db.session() as session:
+        report = ReportRepository(session).get(report_id)
+        loaders = sorted(
+            {r.loader_number for r in report.records if r.id in record_ids and r.processing_status == RecordStatus.UPDATED}
+        )
+        queue_summary(
+            session,
+            container,
+            chat_id=report.chat_id,
+            reply_to=report.result_message_id or report.summary_message_id,
+            loaders=loaders,
+            day=report.report_date,
+            note=report_note(report.report_date, report.shift),
+        )
+    container.wake_worker()
 
 
 def _send_result(container: AppContainer, report_id: int, only: set[int]) -> None:
@@ -104,10 +125,24 @@ def apply_card_job(container: AppContainer, job: ClaimedJob) -> None:
             raise RetryJob(str(exc), delay_seconds=base * (2 ** (job.attempts - 1)) + backoff_delay(1, base=base))
         container.cards.fail_in_flight(card_id, f"Google Sheets kept failing after {job.attempts} attempts; please send it again")
     send_card_result(container, card_id)
+    with container.db.session() as session:
+        card = CardRepository(session).get(card_id)
+        if card is not None and card.status == CardStatus.UPDATED:
+            queue_summary(
+                session,
+                container,
+                chat_id=card.chat_id,
+                reply_to=card.result_message_id,
+                loaders=[card.loader_number],
+                day=card.entry_date,
+                note=f"Updated: {card.entry_date:%d-%m} card entry",
+            )
+    container.wake_worker()
 
 
 HANDLERS = {
     JobType.PROCESS_UPDATE: process_update_job,
     JobType.APPLY_REPORT: apply_report_job,
     JobType.APPLY_CARD: apply_card_job,
+    JobType.SEND_SUMMARY: send_summary_job,
 }
