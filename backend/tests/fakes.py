@@ -92,6 +92,7 @@ class FakeSheets:
     def __init__(self) -> None:
         self.spreadsheets: dict[str, dict[str, Any]] = {}
         self.writes: list[tuple[str, str, list[CellWrite]]] = []
+        self.write_modes: list[bool] = []  # user_entered flag of each write call
         self.failures: dict[str, list[Exception]] = {}
         self.read_delay = 0.0
         self.reads: list[tuple[str, str]] = []
@@ -143,16 +144,21 @@ class FakeSheets:
             time.sleep(self.read_delay)
         return grid
 
-    def write_cells(self, spreadsheet_id: str, worksheet: str, writes: list[CellWrite]) -> None:
+    def write_cells(self, spreadsheet_id: str, worksheet: str, writes: list[CellWrite], *, user_entered: bool = False) -> None:
         self._maybe_fail("write")
         with self._lock:
             ws: FakeWorksheet = self._spreadsheet(spreadsheet_id)["tabs"][worksheet]
             for w in writes:
                 if w.value == "":
                     ws.cells.pop((w.row, w.col), None)
+                elif user_entered and isinstance(w.value, str) and w.value.startswith("="):
+                    # only sums of numbers are evaluated (that is all the bot writes as a formula)
+                    total = sum(float(part) for part in w.value[1:].split("+"))
+                    ws.cells[(w.row, w.col)] = CellValue(effective=total, formatted=f"{total:.2f}", formula=w.value)
                 else:
                     ws.cells[(w.row, w.col)] = CellValue(effective=w.value, formatted=str(w.value))
             self.writes.append((spreadsheet_id, worksheet, list(writes)))
+            self.write_modes.append(user_entered)
 
 
 # --- Sheet builders matching the real layout (columns B..N) -------------------------------------
@@ -234,6 +240,41 @@ def add_month_table(
             ws.set(at(0, row), d.strftime("%d-%m-%Y"))
         else:
             ws.set(at(0, row), serial(d), formatted=d.strftime("%d-%m-%Y"))
+        rows[d] = row
+        d += timedelta(days=1)
+        row += 1
+    return rows
+
+
+def add_card_block(
+    ws: FakeWorksheet,
+    *,
+    top: int,
+    left: int = 4,
+    loader_number: int = 11,
+    year: int = 2026,
+    month: int = 11,
+    filled: bool = False,
+) -> dict[date, int]:
+    """A trip-card block like the real sheet's "Loader 11 Card Details" (title at D41, header at
+    D42): its own Date column, HSD and a trips count per shift, but no per-shift weight/avg, so it
+    is not a shift report. Total Trips / Est. Weight are formulas the bot never writes."""
+
+    def at(offset: int, row: int) -> str:
+        return f"{column_letter(left + offset)}{row}"
+
+    ws.set(at(0, top), f"Loader {loader_number:02d} Card Details")
+    headers = ["Date", "HSD Fuel (L)", "1st Shift Trips", "2nd Shift Trips", "3rd Shift Trips", "Total Trips", "Est. Weight (MT)"]
+    for offset, header in enumerate(headers):
+        ws.set(at(offset, top + 1), header)
+    rows: dict[date, int] = {}
+    d, row = date(year, month, 1), top + 2
+    while d.month == month:
+        ws.set(at(0, row), serial(d), formatted=d.strftime("%d-%m-%Y"))
+        ws.set(at(5, row), 0, formula=f"={at(2, row)}+{at(3, row)}+{at(4, row)}")
+        if filled:
+            for offset, value in ((2, 11), (3, 33), (4, 14), (5, 58), (6, 1960)):
+                ws.set(at(offset, row), value)
         rows[d] = row
         d += timedelta(days=1)
         row += 1

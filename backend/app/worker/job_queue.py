@@ -21,6 +21,7 @@ from app.database.models import Job, JobStatus, utcnow
 class JobType:
     PROCESS_UPDATE = "process_update"
     APPLY_REPORT = "apply_report"
+    APPLY_CARD = "apply_card"
 
 
 class RetryJob(Exception):

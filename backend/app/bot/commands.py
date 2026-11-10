@@ -8,6 +8,7 @@ import shlex
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from app.bot.card_handler import CARD_FORMAT_HELP
 from app.bot.confirmation_handler import approve_correction, reject_correction
 from app.bot.formatting import fmt_date, h, loader_label, render_report_brief, render_result
 from app.container import AppContainer
@@ -193,6 +194,11 @@ def cmd_help(ctx: CommandContext) -> str:
             if cmd.admin_only:
                 lines.append(f"<code>{h(cmd.usage)}</code> — {h(cmd.description)}")
     return "\n".join(lines)
+
+
+@command("card_format", "/card_format", "How to send trip-card trips and HSD", requires_user=False)
+def cmd_card_format(ctx: CommandContext) -> str:
+    return CARD_FORMAT_HELP
 
 
 @command("my_loaders", "/my_loaders", "Loaders you may report for")

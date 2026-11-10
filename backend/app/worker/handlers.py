@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+from app.bot.card_handler import send_card_result
 from app.bot.dispatcher import dispatch_update
 from app.bot.formatting import render_result
 from app.container import AppContainer
@@ -93,7 +94,20 @@ def _send_result(container: AppContainer, report_id: int, only: set[int]) -> Non
     log.info("report result sent", extra={"report_id": report_id, "awaiting_approval": pending_approval})
 
 
+def apply_card_job(container: AppContainer, job: ClaimedJob) -> None:
+    card_id = int(job.payload["card_id"])
+    try:
+        container.cards.apply(card_id)
+    except TransientApplyError as exc:
+        if not job.is_last_attempt:
+            base = container.settings.job_retry_base_seconds
+            raise RetryJob(str(exc), delay_seconds=base * (2 ** (job.attempts - 1)) + backoff_delay(1, base=base))
+        container.cards.fail_in_flight(card_id, f"Google Sheets kept failing after {job.attempts} attempts; please send it again")
+    send_card_result(container, card_id)
+
+
 HANDLERS = {
     JobType.PROCESS_UPDATE: process_update_job,
     JobType.APPLY_REPORT: apply_report_job,
+    JobType.APPLY_CARD: apply_card_job,
 }

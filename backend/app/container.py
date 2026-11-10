@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 from app.core.config import Settings
 from app.database.database import Database
 from app.services.authorization_service import AuthorizationService
+from app.services.card_service import CardService
 from app.services.google_sheets_service import GoogleSheetsClient, SheetsClient
 from app.services.locks import LockManager
 from app.services.report_processor import ReportProcessor
@@ -34,6 +35,7 @@ class AppContainer:
             db, ttl_seconds=settings.sheet_lock_ttl_seconds, wait_seconds=settings.sheet_lock_wait_seconds
         )
         self.processor = ReportProcessor(db, sheets, self.locks, settings, self.auth)
+        self.cards = CardService(db, sheets, self.locks, settings, self.auth)
         self._wake_listeners: list[Callable[[], None]] = []
 
     @classmethod

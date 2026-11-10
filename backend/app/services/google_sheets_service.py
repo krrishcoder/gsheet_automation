@@ -4,7 +4,8 @@ Only three operations are needed:
 * list the tabs of a spreadsheet,
 * read a block of cells with effective values, formatted values, formulas and merges,
 * write individual cells with valueInputOption=RAW (numbers stay numbers; existing number
-  formats such as ``0.000 "MT"`` are cell properties and are not touched).
+  formats such as ``0.000 "MT"`` are cell properties and are not touched). Card HSD cells are
+  written USER_ENTERED so a sum of tanker fills (``=190+154.98``) stays a formula.
 """
 
 from __future__ import annotations
@@ -52,7 +53,9 @@ class SheetsClient(Protocol):
 
     def read_grid(self, spreadsheet_id: str, worksheet: str) -> SheetGrid: ...
 
-    def write_cells(self, spreadsheet_id: str, worksheet: str, writes: list[CellWrite]) -> None: ...
+    def write_cells(
+        self, spreadsheet_id: str, worksheet: str, writes: list[CellWrite], *, user_entered: bool = False
+    ) -> None: ...
 
 
 def quote_sheet_name(name: str) -> str:
@@ -233,11 +236,13 @@ class GoogleSheetsClient:
         )
         return parse_grid_response(payload, worksheet)
 
-    def write_cells(self, spreadsheet_id: str, worksheet: str, writes: list[CellWrite]) -> None:
+    def write_cells(
+        self, spreadsheet_id: str, worksheet: str, writes: list[CellWrite], *, user_entered: bool = False
+    ) -> None:
         if not writes:
             return
         body = {
-            "valueInputOption": "RAW",
+            "valueInputOption": "USER_ENTERED" if user_entered else "RAW",
             "data": [{"range": a1(worksheet, w.row, w.col), "values": [[w.value]]} for w in writes],
         }
         self._request(

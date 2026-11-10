@@ -135,6 +135,19 @@ class RecordOperation(str, enum.Enum):
     REPLACE = "REPLACE"  # existing shift values were replaced (a correction)
 
 
+class CardStatus(str, enum.Enum):
+    PENDING_CONFIRMATION = "PENDING_CONFIRMATION"  # preview sent, waiting for Confirm/Cancel
+    BLOCKED = "BLOCKED"  # cannot be saved (see error_code); final
+    UNCHANGED = "UNCHANGED"  # the sheet already has these values; final
+    QUEUED = "QUEUED"  # confirmed, waiting for the worker
+    APPLYING = "APPLYING"  # previous values captured, sheet write in progress
+    UPDATED = "UPDATED"  # final
+    FAILED = "FAILED"  # final; send the message again
+    CONFLICT = "CONFLICT"  # sheet changed between preview and write; final
+    CANCELLED = "CANCELLED"
+    EXPIRED = "EXPIRED"
+
+
 class JobStatus(str, enum.Enum):
     QUEUED = "QUEUED"
     RUNNING = "RUNNING"
@@ -352,6 +365,47 @@ class ShiftEntry(Base):
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
 
     __table_args__ = (UniqueConstraint("loader_id", "report_date", "shift", name="uq_shift_entry_identity"),)
+
+
+class CardEntry(Base):
+    """A typed trip-card / HSD message for one loader and day: any of the three shifts' trips and
+    the day's tanker fills, written to the loader's card block (e.g. "Loader 11 Card Details")."""
+
+    __tablename__ = "card_entries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    loader_number: Mapped[int] = mapped_column(Integer)
+    loader_id: Mapped[int | None] = mapped_column(ForeignKey("loaders.id"), index=True)
+    entry_date: Mapped[date] = mapped_column(Date)
+    trips: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # {"1": 36, "3": 44}: only shifts sent
+    hsd_fills: Mapped[list[str]] = mapped_column(JSON, default=list)  # decimal strings, litres
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger)
+    source_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    source_update_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("telegram_updates.update_id"), unique=True)
+    raw_text: Mapped[str] = mapped_column(Text)
+    status: Mapped[CardStatus] = mapped_column(_enum(CardStatus), default=CardStatus.PENDING_CONFIRMATION)
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    spreadsheet_id: Mapped[str | None] = mapped_column(String(128))
+    worksheet_name: Mapped[str | None] = mapped_column(String(255))
+    sheet_row: Mapped[int | None] = mapped_column(Integer)
+    preview: Mapped[dict[str, Any] | None] = mapped_column(JSON)  # cells before/after as seen at preview
+    previous_values: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    updated_values: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    summary_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    result_message_id: Mapped[int | None] = mapped_column(BigInteger)
+    confirmed_by: Mapped[int | None] = mapped_column(BigInteger)
+    confirmed_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    applied_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(UTCDateTime)
+
+    loader: Mapped[Loader | None] = relationship()
+
+    __table_args__ = (Index("ix_card_entries_loader_date", "loader_number", "entry_date"),)
 
 
 # --- Infrastructure -------------------------------------------------------------------------

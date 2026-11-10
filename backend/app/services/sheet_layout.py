@@ -357,12 +357,16 @@ def find_report_tables(
     tables = find_tables(grid)
     report, ignored = [], []
     for table in tables:
-        try:
-            detect_layout(_region(grid, table), _shifted_config(table, configured), scan_rows=scan_rows)
-            report.append(table)
-        except SheetLayoutError:
-            ignored.append(table)
+        (report if _is_report_table(grid, table, configured, scan_rows) else ignored).append(table)
     return (report, ignored) if report else (tables, [])
+
+
+def _is_report_table(grid: SheetGrid, table: TableRegion, configured: dict[str, str], scan_rows: int) -> bool:
+    try:
+        detect_layout(_region(grid, table), _shifted_config(table, configured), scan_rows=scan_rows)
+    except SheetLayoutError:
+        return False
+    return True
 
 
 def locate_table(
@@ -427,6 +431,73 @@ def locate_table(
     sub = _region(grid, table)
     layout = detect_layout(sub, _shifted_config(table, configured), detection=detection, strict=strict, scan_rows=scan_rows)
     return sub, layout, table
+
+
+# --- Card-details blocks ----------------------------------------------------------------------
+
+CARD_TRIP_COLUMNS = {1: Col.SHIFT_1_TRIPS, 2: Col.SHIFT_2_TRIPS, 3: Col.SHIFT_3_TRIPS}
+_CARD_HEADERS = "Date, HSD Fuel (L), 1st Shift Trips, 2nd Shift Trips, 3rd Shift Trips"
+
+
+def detect_card_layout(grid: SheetGrid, *, scan_rows: int = 20) -> SheetLayout:
+    """Columns of a trip-card block: Date, one trips column per shift and (optionally) HSD Fuel.
+    Other columns (Total Trips, Est. Weight, …) are the sheet's own and are never written."""
+    date_row, date_col = _find_date_header(grid, scan_rows, None)
+    header_rows = [date_row]
+    if date_row - 1 >= grid.start_row and _row_has_shift_groups(grid, date_row - 1):
+        header_rows.insert(0, date_row - 1)
+    if _row_is_subheader(grid, date_row + 1, date_col):
+        header_rows.append(date_row + 1)
+    found: dict[Col, list[int]] = {}
+    for col, label in _combined_labels(grid, header_rows).items():
+        logical = classify_label(label)
+        if logical in (Col.HSD_FUEL, *CARD_TRIP_COLUMNS.values()):
+            found.setdefault(logical, []).append(col)
+    columns = {Col.DATE: date_col}
+    problems = []
+    for logical in (*CARD_TRIP_COLUMNS.values(), Col.HSD_FUEL):
+        cols = found.get(logical, [])
+        if len(cols) == 1:
+            columns[logical] = cols[0]
+        elif cols:
+            problems.append(f"{logical.value} in more than one column ({', '.join(column_letter(c) for c in cols)})")
+        elif logical is not Col.HSD_FUEL:
+            problems.append(f"no {logical.value} column")
+    if problems:
+        raise SheetLayoutError(
+            "CARD_HEADER_NOT_RECOGNISED", f"Card block headers not recognised ({'; '.join(problems)}); expected {_CARD_HEADERS}"
+        )
+    return SheetLayout(columns=columns, header_rows=header_rows, data_start_row=header_rows[-1] + 1, detected=True)
+
+
+def locate_card_table(
+    grid: SheetGrid, loader_number: int, configured: dict[str, str], *, scan_rows: int = 20
+) -> tuple[SheetGrid, SheetLayout, TableRegion]:
+    """The loader's trip-card block: a table titled for the loader (e.g. "Loader 11 Card Details")
+    that is not its shift report and has a trips column per shift."""
+    found, reasons = [], []
+    for table in find_tables(grid):
+        if table.loader_number != loader_number or _is_report_table(grid, table, configured, scan_rows):
+            continue
+        sub = _region(grid, table)
+        try:
+            found.append((sub, detect_card_layout(sub, scan_rows=scan_rows), table))
+        except SheetLayoutError as exc:
+            reasons.append(f"{table.describe()}: {exc.message}")
+    if len(found) == 1:
+        return found[0]
+    if found:
+        raise SheetLayoutError(
+            "CARD_TABLE_AMBIGUOUS",
+            f"'{grid.title}' has {len(found)} card blocks for Loader {loader_number:02d}: "
+            + "; ".join(t.describe() for _, _, t in found),
+        )
+    raise SheetLayoutError(
+        "CARD_TABLE_NOT_FOUND",
+        f"'{grid.title}' has no card block for Loader {loader_number:02d}. Add a block titled "
+        f"'Loader {loader_number:02d} Card Details' with the columns {_CARD_HEADERS}"
+        + (f" ({'; '.join(reasons)})" if reasons else ""),
+    )
 
 
 # --- Cell value conversion ------------------------------------------------------------------

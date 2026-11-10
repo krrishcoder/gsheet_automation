@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 from datetime import timedelta
 
+from app.bot.card_handler import cancel_card, confirm_card
 from app.bot.formatting import fmt_shift_values, h, loader_label, render_summary
 from app.container import AppContainer
 from app.database.models import RecordStatus, ReportStatus, User, utcnow
@@ -37,6 +38,10 @@ def handle_callback(container: AppContainer, query: TgCallbackQuery) -> None:
         confirm_report(container, query, user, target)
     elif action == "rx":
         cancel_report(container, query, user, target)
+    elif action == "kc":
+        confirm_card(container, query, user, target)
+    elif action == "kx":
+        cancel_card(container, query, user, target)
     elif action in ("ca", "cr"):
         if not container.auth.is_admin(user):
             container.telegram.answer_callback_query(query.id, "⛔ Administrators only.", show_alert=True)

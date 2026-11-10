@@ -12,6 +12,8 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.database.models import (
     AuditLog,
+    CardEntry,
+    CardStatus,
     Job,
     JobStatus,
     Loader,
@@ -267,6 +269,27 @@ class JobRepository:
 
     def has_dead(self) -> bool:
         return bool(self.session.scalar(select(func.count()).where(Job.status == JobStatus.DEAD)))
+
+
+class CardRepository:
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def get(self, card_id: int) -> CardEntry | None:
+        return self.session.get(CardEntry, card_id)
+
+    def get_by_update(self, update_id: int) -> CardEntry | None:
+        return self.session.scalar(select(CardEntry).where(CardEntry.source_update_id == update_id))
+
+    def transition(self, card_id: int, from_statuses: Iterable[CardStatus], to_status: CardStatus, **values: Any) -> bool:
+        """Compare-and-set status change; returns False if another actor got there first."""
+        result = self.session.execute(
+            update(CardEntry)
+            .where(CardEntry.id == card_id, CardEntry.status.in_(list(from_statuses)))
+            .values(status=to_status, updated_at=utcnow(), **values)
+            .execution_options(synchronize_session=False)
+        )
+        return result.rowcount == 1
 
 
 def audit(

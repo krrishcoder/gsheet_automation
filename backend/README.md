@@ -122,7 +122,7 @@ backend/
 │   ├── schemas/report.py, telegram.py, sheets.py
 │   └── core/config.py, security.py, logging.py
 ├── scripts/set_webhook.py          register / inspect / delete the webhook
-├── tests/                          194 tests, external APIs faked
+├── tests/                          225 tests, external APIs faked
 ├── deploy/Caddyfile                HTTPS reverse proxy (EC2)
 ├── Dockerfile, docker-compose.yml, .env.example, requirements*.txt
 ```
@@ -245,12 +245,47 @@ summary says so.
 * The bot always reads the whole tab, however far right or down the tables go. (Older versions had
   `SHEET_READ_MAX_ROWS` / `SHEET_READ_LAST_COLUMN`; they are no longer used and are ignored if still set.)
 
+### Trip card / HSD messages
+
+Trip counts from the operator's trip card and the HSD tanker fills are typed into one short
+message (on WhatsApp, then forwarded, or straight to the bot) and saved in the loader's card block,
+for example *Loader 11 Card Details* (columns Date, HSD Fuel (L), 1st/2nd/3rd Shift Trips):
+
+```
+CARD L11
+Date: 06-11-2026
+1st: 36
+2nd: 37
+3rd: 44
+HSD: 190 + 154.98
+```
+
+* The first line must contain **CARD** and the loader (`L11`, `Loader 11`). The date can be on its
+  own line or the first line, with or without the year (`06-11`).
+* **Send only what you have.** One shift, two, all three, or only HSD, and only those cells are
+  written; the rest of the row is left alone. A day can be filled in as the shifts finish.
+  One line works too: `CARD L11 06-11 3rd 44 HSD 154.98`.
+* **Trips**: the number is the shift's value. If the cell already has a different number, the
+  preview shows "⚠️ replaces 30" before you confirm (same correction policy as reports).
+* **HSD**: each tanker fill in litres. Fills that are not in the cell yet are added, and the cell is
+  written as a sum (`=190+154.98`) like the hand-typed ones. A fill that is already saved for that
+  day is not added again, so re-sending a message, or sending the whole day after a partial one,
+  never double counts. Two fills of exactly the same litres must be sent together (`HSD: 150 + 150`).
+  A wrong fill is fixed by editing the cell in the sheet.
+* The preview compares the card's trips with the CHP report in the loader's shift table
+  ("CHP report 21 (card +15)"). Total Trips, Est. Weight and other formulas are never written.
+* The card block is found by its title ("Loader NN" plus anything, e.g. *Card Details*) and its
+  headers; it must not be a full shift table. Like reports, nothing is written before Confirm, the
+  previewed cells are re-checked before writing, and the bot never overwrites another formula.
+* `/card_format` shows the format in Telegram.
+
 ### Commands
 
 | Command | Who | Purpose |
 |---|---|---|
 | `/start`, `/help` | everyone | your Telegram ID, role and commands |
 | `/my_loaders` | user | loaders you may report for |
+| `/card_format` | everyone | how to send trip-card trips and HSD |
 | `/my_reports`, `/report <id>` | user | your recent reports, per-loader results |
 | `/set_sheet [loader …] <url>` | admin | register / change spreadsheet for one or more loaders; without numbers, for every "Loader NN" tab in the file (validates the URL, checks access, shows each loader's tab) |
 | `/list_loaders`, `/loader_info <loader>` | admin | configuration overview |
@@ -420,7 +455,7 @@ Tables are created at startup (`create_all`).
 
 ## 11. Testing
 
-`pytest` runs 194 tests with fake Telegram and in-memory Google Sheets: parser variants (shifts,
+`pytest` runs 225 tests with fake Telegram and in-memory Google Sheets: parser variants (shifts,
 dates, Nil, PC, duplicates), totals validation, header detection (single/two-tier/merged/moved
 columns/not row 1), date-row matching (serials and text), column mapping, averages and totals,
 preservation of other cells and formulas, worksheet routing, authorisation per loader, corrections
