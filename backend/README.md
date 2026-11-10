@@ -237,8 +237,8 @@ summary says so.
   twice. A tab with a single table still works without a title, unless the title names a different
   loader (e.g. a tab copied from another loader).
 * `/check_sheet 5 2026 11` shows which table was picked (title, rows, columns) and its columns.
-* The bot reads rows 1–400 and columns A–BZ of a tab (`SHEET_READ_MAX_ROWS`, `SHEET_READ_LAST_COLUMN`),
-  enough for three tables side by side or stacked.
+* The bot always reads the whole tab, however far right or down the tables go. (Older versions had
+  `SHEET_READ_MAX_ROWS` / `SHEET_READ_LAST_COLUMN`; they are no longer used and are ignored if still set.)
 
 ### Commands
 

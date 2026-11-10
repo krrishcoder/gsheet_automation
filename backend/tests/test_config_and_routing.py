@@ -179,3 +179,11 @@ def test_loader_number_in_tab_title(title, number):
     from app.services.worksheet_service import loader_number_in_title
 
     assert loader_number_in_title(title) == number
+
+
+def test_old_read_range_settings_are_ignored(monkeypatch):
+    # Render may still carry SHEET_READ_LAST_COLUMN=Z from an old .env; it must not limit reading.
+    monkeypatch.setenv("SHEET_READ_LAST_COLUMN", "Z")
+    monkeypatch.setenv("SHEET_READ_MAX_ROWS", "150")
+    s = Settings(_env_file=None)
+    assert not hasattr(s, "sheet_read_last_column") and not hasattr(s, "sheet_read_max_rows")

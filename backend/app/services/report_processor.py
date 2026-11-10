@@ -124,12 +124,7 @@ class ReportProcessor:
     # --- Sheet access helpers ---------------------------------------------------------------
 
     def _read_tab(self, spreadsheet_id: str, worksheet: str) -> SheetGrid:
-        return self.sheets.read_grid(
-            spreadsheet_id,
-            worksheet,
-            last_row=self.settings.sheet_read_max_rows,
-            last_col=self.settings.sheet_read_last_column,
-        )
+        return self.sheets.read_grid(spreadsheet_id, worksheet)
 
     def _load_row(
         self, grid: SheetGrid, loader_number: int, report_date: date, *, require_title: bool = False

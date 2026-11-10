@@ -44,7 +44,7 @@ def combined_tab(arrangement: str, *, untitled: tuple[int, ...] = (), title: str
 def grid_of(ws):
     sheets = FakeSheets()
     sheets.add_worksheet("x" * 25, ws)
-    return sheets.read_grid("x" * 25, ws.title, last_row=400, last_col="BZ")
+    return sheets.read_grid("x" * 25, ws.title)
 
 
 def setup(container, arrangement="stacked", **kwargs):

@@ -126,7 +126,7 @@ class FakeSheets:
         doc = self._spreadsheet(spreadsheet_id)
         return SpreadsheetInfo(title=doc["title"], worksheet_titles=list(doc["tabs"]))
 
-    def read_grid(self, spreadsheet_id: str, worksheet: str, *, last_row: int, last_col: str) -> SheetGrid:
+    def read_grid(self, spreadsheet_id: str, worksheet: str) -> SheetGrid:
         self._maybe_fail("read")
         self.reads.append((spreadsheet_id, worksheet))
         with self._lock:
@@ -134,9 +134,10 @@ class FakeSheets:
             if worksheet not in doc["tabs"]:
                 raise SheetsError("WORKSHEET_NOT_FOUND", f"Worksheet not found ({worksheet})", status=400)
             ws: FakeWorksheet = doc["tabs"][worksheet]
-            max_col = column_index(last_col)
+            # like the API: the whole tab, trimmed to the used area
+            max_col = max((c for _, c in ws.cells), default=0)
             used_rows = max((r for r, _ in ws.cells), default=0)
-            rows = [[ws.cells.get((r, c), CellValue()) for c in range(1, max_col + 1)] for r in range(1, min(used_rows, last_row) + 1)]
+            rows = [[ws.cells.get((r, c), CellValue()) for c in range(1, max_col + 1)] for r in range(1, used_rows + 1)]
             grid = SheetGrid(title=worksheet, rows=rows, merges=list(ws.merges))
         if self.read_delay:
             time.sleep(self.read_delay)

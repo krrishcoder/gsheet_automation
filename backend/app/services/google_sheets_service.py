@@ -50,7 +50,7 @@ class SheetsClient(Protocol):
 
     def get_spreadsheet_info(self, spreadsheet_id: str) -> SpreadsheetInfo: ...
 
-    def read_grid(self, spreadsheet_id: str, worksheet: str, *, last_row: int, last_col: str) -> SheetGrid: ...
+    def read_grid(self, spreadsheet_id: str, worksheet: str) -> SheetGrid: ...
 
     def write_cells(self, spreadsheet_id: str, worksheet: str, writes: list[CellWrite]) -> None: ...
 
@@ -215,12 +215,14 @@ class GoogleSheetsClient:
         titles = [s.get("properties", {}).get("title", "") for s in payload.get("sheets", [])]
         return SpreadsheetInfo(title=payload.get("properties", {}).get("title", ""), worksheet_titles=titles)
 
-    def read_grid(self, spreadsheet_id: str, worksheet: str, *, last_row: int, last_col: str) -> SheetGrid:
+    def read_grid(self, spreadsheet_id: str, worksheet: str) -> SheetGrid:
+        """The whole tab. A fixed range (e.g. A1:Z150) silently cut off tables placed further right
+        or lower; the API returns only the used area, so reading the whole tab stays small."""
         payload = self._request(
             "GET",
             f"{API_BASE}/{spreadsheet_id}",
             params={
-                "ranges": f"{quote_sheet_name(worksheet)}!A1:{last_col}{last_row}",
+                "ranges": quote_sheet_name(worksheet),
                 "includeGridData": "true",
                 "fields": (
                     "sheets(properties(title),merges,"

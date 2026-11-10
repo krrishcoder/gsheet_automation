@@ -460,9 +460,7 @@ def cmd_check_sheet(ctx: CommandContext) -> str:
         how = "auto-detected" if resolution.auto_detected else "configured"
         shared = " — month tab shared by loaders" if resolution.shared else ""
         lines.append(f"Worksheet: '{h(resolution.worksheet_name)}' ({how}{shared})")
-        tab = sheets.read_grid(
-            spreadsheet_id, resolution.worksheet_name, last_row=settings.sheet_read_max_rows, last_col=settings.sheet_read_last_column
-        )
+        tab = sheets.read_grid(spreadsheet_id, resolution.worksheet_name)
         grid, layout, table = locate_table(
             tab,
             number,

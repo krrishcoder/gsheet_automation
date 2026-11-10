@@ -76,10 +76,10 @@ def test_grid_parsing_keeps_values_formats_formulas_and_merges():
 
 def test_read_grid_requests_only_needed_fields_and_quotes_the_tab():
     client, session = client_with([FakeResponse(200, GRID_PAYLOAD)])
-    client.read_grid("SID", "Loader 11's nov", last_row=150, last_col="Z")
+    client.read_grid("SID", "Loader 11's nov")
     method, url, kwargs = session.calls[0]
     assert method == "GET" and url.endswith("/spreadsheets/SID")
-    assert kwargs["params"]["ranges"] == "'Loader 11''s nov'!A1:Z150"
+    assert kwargs["params"]["ranges"] == "'Loader 11''s nov'"  # the whole tab
     assert "formattedValue" in kwargs["params"]["fields"] and "merges" in kwargs["params"]["fields"]
 
 
@@ -123,7 +123,7 @@ def test_retries_give_up_after_max_attempts():
 def test_permanent_errors_are_not_retried(status, message, code):
     client, session = client_with([FakeResponse(status, {"error": {"message": message}})])
     with pytest.raises(SheetsError) as exc:
-        client.read_grid("SID", "X", last_row=10, last_col="Z")
+        client.read_grid("SID", "X")
     assert exc.value.code == code and not exc.value.retryable
     assert len(session.calls) == 1
     if code == "SHEET_ACCESS_DENIED":

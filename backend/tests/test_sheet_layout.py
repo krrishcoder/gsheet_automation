@@ -22,7 +22,7 @@ from tests.fakes import FakeSheets, FakeWorksheet, build_month_sheet
 def grid_of(ws: FakeWorksheet) -> SheetGrid:
     sheets = FakeSheets()
     sheets.add_worksheet("x" * 25, ws)
-    return sheets.read_grid("x" * 25, ws.title, last_row=150, last_col="Z")
+    return sheets.read_grid("x" * 25, ws.title)
 
 
 EXPECTED = {Col(k): column_index(v) for k, v in DEFAULT_COLUMN_MAP.items()}
