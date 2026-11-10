@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.bot.formatting import h
 from app.container import AppContainer
-from app.database.repositories import SummaryRecipientRepository
+from app.database.repositories import SettingRepository, SummaryRecipientRepository
 from app.schemas.report import SHIFT_LABELS
 from app.services.google_sheets_service import SheetsError
 from app.services.retry import backoff_delay
@@ -18,6 +18,15 @@ from app.services.summary_service import render_summary, whatsapp_link
 from app.worker.job_queue import ClaimedJob, JobType, RetryJob, enqueue
 
 log = logging.getLogger(__name__)
+
+
+SUMMARY_LOADERS = "summary_loaders"  # app setting: comma-separated loader numbers; unset = every loader
+
+
+def summary_loaders(session: Session) -> set[int] | None:
+    """The loaders the boss summary covers (None: all of them)."""
+    value = SettingRepository(session).get(SUMMARY_LOADERS)
+    return None if not value else {int(n) for n in value.split(",")}
 
 
 def summary_message(container: AppContainer, loaders: list[int], year: int, month: int, *, note: str | None = None):
@@ -49,8 +58,12 @@ def queue_summary(
     day: date,
     note: str,
 ) -> None:
-    if not container.settings.summary_after_update or not loaders:
+    if not container.settings.summary_after_update:
         return
+    chosen = summary_loaders(session)
+    loaders = [n for n in loaders if chosen is None or n in chosen]
+    if not loaders:
+        return  # the update was for loaders the boss summary does not cover
     enqueue(
         session,
         JobType.SEND_SUMMARY,

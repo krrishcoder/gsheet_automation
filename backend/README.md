@@ -122,7 +122,7 @@ backend/
 │   ├── schemas/report.py, telegram.py, sheets.py
 │   └── core/config.py, security.py, logging.py
 ├── scripts/set_webhook.py          register / inspect / delete the webhook
-├── tests/                          256 tests, external APIs faked
+├── tests/                          257 tests, external APIs faked
 ├── deploy/Caddyfile                HTTPS reverse proxy (EC2)
 ├── Dockerfile, docker-compose.yml, .env.example, requirements*.txt
 ```
@@ -311,7 +311,9 @@ Profit with GST: ₹139,201.66
   "Operating Profit (Pre-GST)" and "Profit With Gst" inside the loader's blocks. A figure a loader
   does not have (e.g. no refill log) is left out.
 * The summary covers the loaders the update wrote (a report: all of them; a card message: that
-  loader).
+  loader). `/summary_loaders 11` (admin) limits it to Loader 11: other loaders are left out, and an
+  update that only touches them sends no summary. `/summary_loaders` shows the choice,
+  `/summary_loaders all` resets it.
 * `/boss_add <WhatsApp number> [name]` (admin) makes the button open that person's chat directly
   ("📲 Send to Sharma ji on WhatsApp", one button per number); without a number the button lets
   you pick the chat. `/boss_list`, `/boss_remove <number>`. A 10-digit number gets +91.
@@ -326,6 +328,7 @@ Profit with GST: ₹139,201.66
 | `/my_loaders` | user | loaders you may report for |
 | `/summary [loader …] [year month]` | user | month summary with a "send on WhatsApp" button |
 | `/boss_add <number> [name]`, `/boss_remove <number>`, `/boss_list` | admin | WhatsApp numbers the summary button opens |
+| `/summary_loaders [loader …\|all]` | admin | which loaders the boss summary covers |
 | `/card_format` | everyone | the short message for card trips, hour meter and diesel |
 | `/my_reports`, `/report <id>` | user | your recent reports, per-loader results |
 | `/set_sheet [loader …] <url>` | admin | register / change spreadsheet for one or more loaders; without numbers, for every "Loader NN" tab in the file (validates the URL, checks access, shows each loader's tab) |
@@ -496,7 +499,7 @@ Tables are created at startup (`create_all`).
 
 ## 11. Testing
 
-`pytest` runs 256 tests with fake Telegram and in-memory Google Sheets: parser variants (shifts,
+`pytest` runs 257 tests with fake Telegram and in-memory Google Sheets: parser variants (shifts,
 dates, Nil, PC, duplicates), totals validation, header detection (single/two-tier/merged/moved
 columns/not row 1), date-row matching (serials and text), column mapping, averages and totals,
 preservation of other cells and formulas, worksheet routing, authorisation per loader, corrections

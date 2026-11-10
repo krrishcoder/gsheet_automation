@@ -9,7 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from app.bot.card_handler import CARD_FORMAT_HELP
-from app.bot.summary_handler import summary_message
+from app.bot.summary_handler import SUMMARY_LOADERS, summary_loaders, summary_message
 from app.bot.confirmation_handler import approve_correction, reject_correction
 from app.bot.formatting import fmt_date, h, loader_label, render_report_brief, render_result
 from app.container import AppContainer
@@ -17,6 +17,7 @@ from app.database.models import RecordStatus, ReportStatus, SummaryRecipient, Tr
 from app.database.repositories import (
     LoaderRepository,
     ReportRepository,
+    SettingRepository,
     SummaryRecipientRepository,
     TrustedChatRepository,
     UserRepository,
@@ -663,7 +664,9 @@ def cmd_summary(ctx: CommandContext):
             allowed = [l.loader_number for l in LoaderRepository(session).list_all() if l.is_active]
         else:
             allowed = [l.loader_number for l in UserRepository(session).get_by_telegram_id(ctx.actor_id).loaders if l.is_active]
-    loaders = [n for n in numbers if n in allowed] if numbers else allowed
+        chosen = summary_loaders(session)
+    # loaders named in the command; otherwise the ones the boss summary covers (/summary_loaders)
+    loaders = [n for n in numbers if n in allowed] if numbers else [n for n in allowed if chosen is None or n in chosen]
     if not loaders:
         return "No loaders to summarise." + (" (You have no access to those loaders.)" if numbers else "")
     try:
@@ -685,6 +688,27 @@ def _phone_and_rest(args: list[str]) -> tuple[str, list[str]]:
     if phone is None:
         raise UsageError(f"'{raw}' is not a phone number (e.g. 9876543210 or +91 98765 43210)")
     return phone, args[count:]
+
+
+@command("summary_loaders", "/summary_loaders [loader …|all]", "Which loaders the boss summary covers", admin_only=True)
+def cmd_summary_loaders(ctx: CommandContext) -> str:
+    with ctx.container.db.session() as session:
+        if ctx.args:
+            if [a.lower() for a in ctx.args] == ["all"]:
+                SettingRepository(session).set(SUMMARY_LOADERS, None, actor=ctx.actor_id)
+            else:
+                numbers = sorted({parse_loader_number(a) for a in ctx.args})
+                known = {l.loader_number for l in LoaderRepository(session).list_all()}
+                unknown = [n for n in numbers if n not in known]
+                if unknown:
+                    raise UsageError("Not registered: " + ", ".join(f"Loader {n:02d}" for n in unknown))
+                SettingRepository(session).set(SUMMARY_LOADERS, ",".join(map(str, numbers)), actor=ctx.actor_id)
+            audit(session, "summary_loaders_set", actor=ctx.actor_id, value=" ".join(ctx.args))
+        chosen = summary_loaders(session)
+    if chosen is None:
+        return "The boss summary covers <b>every loader</b>. Limit it: <code>/summary_loaders 11</code>"
+    names = ", ".join(f"Loader {n:02d}" for n in sorted(chosen))
+    return f"The boss summary covers only <b>{names}</b>. Other loaders' updates send no summary. All again: <code>/summary_loaders all</code>"
 
 
 @command("boss_add", "/boss_add <WhatsApp number> [name]", "Add a WhatsApp number for the summary button", admin_only=True)
@@ -721,10 +745,12 @@ def cmd_boss_list(ctx: CommandContext) -> str:
         if not recipients:
             return "No WhatsApp numbers yet — the summary gets a plain 'Share on WhatsApp' button. Add one: /boss_add &lt;number&gt; &lt;name&gt;"
         auto = "on" if ctx.container.settings.summary_after_update else "off (SUMMARY_AFTER_UPDATE=false)"
+        chosen = summary_loaders(session)
+        covers = "every loader" if chosen is None else ", ".join(f"Loader {n:02d}" for n in sorted(chosen))
         return (
             "<b>Summary goes to</b>\n"
             + "\n".join(f"• {h(r.name or '')} <code>+{r.phone}</code>" for r in recipients)
-            + f"\n\nSent after every sheet update: {auto}"
+            + f"\n\nCovers: {covers} (/summary_loaders)\nSent after every sheet update: {auto}"
         )
 
 

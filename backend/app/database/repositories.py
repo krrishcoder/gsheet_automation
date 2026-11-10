@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
 from app.database.models import (
+    AppSetting,
     AuditLog,
     CardEntry,
     CardStatus,
@@ -270,6 +271,26 @@ class JobRepository:
 
     def has_dead(self) -> bool:
         return bool(self.session.scalar(select(func.count()).where(Job.status == JobStatus.DEAD)))
+
+
+class SettingRepository:
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def get(self, key: str) -> str | None:
+        setting = self.session.get(AppSetting, key)
+        return None if setting is None else setting.value
+
+    def set(self, key: str, value: str | None, *, actor: int | None) -> None:
+        setting = self.session.get(AppSetting, key)
+        if value is None:
+            if setting is not None:
+                self.session.delete(setting)
+        elif setting is None:
+            self.session.add(AppSetting(key=key, value=value, updated_by=actor))
+        else:
+            setting.value, setting.updated_by = value, actor
+        self.session.flush()  # sessions do not autoflush; a get() right after must see the change
 
 
 class SummaryRecipientRepository:

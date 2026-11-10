@@ -116,3 +116,32 @@ def test_whatsapp_link_encodes_the_whole_text():
     url = whatsapp_link("*Loader 11*\nProfit: ₹71,514.61 & more", "919876543210")
     assert url.startswith("https://wa.me/919876543210?text=") and "\n" not in url and " " not in url and "&" not in url.split("?", 1)[1]
     assert sent_text(url) == "*Loader 11*\nProfit: ₹71,514.61 & more"
+
+
+def test_summary_limited_to_chosen_loaders(boss_bot):
+    bot = boss_bot
+    assert "covers only <b>Loader 11</b>" in bot.send("/summary_loaders 11", user_id=ADMIN_ID)["text"]
+    assert "Not registered: Loader 07" in bot.send("/summary_loaders 7", user_id=ADMIN_ID)["text"]
+    assert "⛔" in bot.send("/summary_loaders all", user_id=USER_ID)["text"]  # admins only
+
+    bot.confirm(bot.send(SAMPLE_REPORT, user_id=ADMIN_ID), user_id=ADMIN_ID)  # writes loaders 01, 05 and 11
+    month = bot.telegram.sent[-1]
+    text = sent_text(button_urls(month)[0])
+    assert "*Loader 11*" in text and "*Loader 01*" not in text and "*Loader 05*" not in text
+    assert "Loader 01" not in month["text"]
+
+    on_demand = bot.send("/summary", user_id=ADMIN_ID)["text"]
+    assert "Loader 11" in on_demand and "Loader 01" not in on_demand
+    assert "Loader 01" in bot.send("/summary 1", user_id=ADMIN_ID)["text"]  # asking by number still works
+    bot.send("/boss_add 9876543210 Boss", user_id=ADMIN_ID)
+    assert "Covers: Loader 11 (/summary_loaders)" in bot.send("/boss_list", user_id=ADMIN_ID)["text"]
+
+    bot.send("/summary_loaders 5", user_id=ADMIN_ID)
+    before = len(bot.telegram.sent)
+    summary = bot.send("L11 10-11 T1 37", user_id=ADMIN_ID)
+    button = next(d for d in bot.telegram.buttons(summary) if d.startswith("kc:"))
+    bot.press(button, user_id=ADMIN_ID, message=summary)
+    assert not any(m["text"].startswith("📊") for m in bot.telegram.sent[before:])  # Loader 11 not covered: no summary
+
+    assert "covers <b>every loader</b>" in bot.send("/summary_loaders all", user_id=ADMIN_ID)["text"]
+    assert "Loader 01" in bot.send("/summary", user_id=ADMIN_ID)["text"]

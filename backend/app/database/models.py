@@ -423,6 +423,17 @@ class SummaryRecipient(Base):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
 
 
+class AppSetting(Base):
+    """Settings changed from Telegram by an administrator (e.g. which loaders the summary covers)."""
+
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text)
+    updated_by: Mapped[int | None] = mapped_column(BigInteger)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow)
+
+
 # --- Infrastructure -------------------------------------------------------------------------
 
 
