@@ -184,3 +184,11 @@ def test_text_with_units_in_input_cells_is_read_and_garbage_rejected():
 def test_column_letters_roundtrip():
     for idx in (1, 2, 14, 26, 27, 52, 703):
         assert column_index(column_letter(idx)) == idx
+
+
+@pytest.mark.parametrize("header", ["Quantity", "Quantity (MT)", "Weight (MT)", "Total Quantity"])
+def test_day_total_weight_headed_just_quantity(header):
+    ws, rows = build_month_sheet("t", 2026, 11, two_tier=False)
+    ws.set("M2", header)  # was "Day Total Weight (MT)"
+    layout = detect_layout(grid_of(ws), DEFAULT_COLUMN_MAP)
+    assert layout.letter(Col.DAY_TOTAL_WEIGHT) == "M" and layout.letter(Col.SHIFT_1_WEIGHT) == "E"

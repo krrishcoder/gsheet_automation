@@ -131,6 +131,9 @@ def classify_label(label: str) -> Col | None:
         return Col.HSD_FUEL
     if _DATE_RE.search(label) and not (has_trip or has_weight or has_avg):
         return Col.DATE
+    if has_weight and not (has_trip or has_avg):
+        # a weight column of no shift is the day's total, also when headed just "Quantity"
+        return Col.DAY_TOTAL_WEIGHT
     return None
 
 
@@ -443,11 +446,15 @@ _SPEED_RE = re.compile(r"\bspeed\b")
 
 def _card_key(label: str) -> str | None:
     logical = classify_label(label)
+    if logical in {Col(f"SHIFT_{n}_{m}") for n in (1, 2, 3) for m in ("WEIGHT", "AVG")}:
+        return "shift_weight"  # a shift table (even one with a header the bot misreads) is no card block
     if logical is Col.HSD_FUEL:
         return "hsd"
     for shift in (1, 2, 3):
         if logical is Col(f"SHIFT_{shift}_TRIPS"):
             return f"trips{shift}"
+    if not _shift_of(label) and not _AVG_RE.search(label) and not _TRIP_RE.search(label) and _WEIGHT_RE.search(label):
+        return "qty"  # "Est. Weight (MT)": read for the summary, never written
     return None
 
 
@@ -513,8 +520,9 @@ BLOCK_KINDS = {
         "card block",
         _card_key,
         ("trips1", "trips2", "trips3"),
-        ("hsd",),
+        ("hsd", "qty"),
         "'Loader {n} Card Details' with the columns Date, HSD Fuel (L), 1st Shift Trips, 2nd Shift Trips, 3rd Shift Trips",
+        forbidden=("shift_weight",),
     ),
     "hm": BlockKind(
         "opening/closing HM block",

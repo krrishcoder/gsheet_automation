@@ -242,3 +242,14 @@ def test_check_sheet_shows_the_loaders_table(bot, container):
     assert "Table: 'Loader 11 – November 2026'" in text and "(1 of 3 tables in this tab)" in text
     assert "SHIFT_1_TRIPS=AF" in text and "DAY_TOTAL_TRIPS=AP" in text
     assert "Date rows: 30" in text
+
+
+def test_a_shift_table_is_never_taken_for_a_card_block():
+    from app.services.sheet_layout import locate_block
+
+    ws, tables = combined_tab("side")
+    add_card_block(ws, top=41)
+    left11 = tables[11][0]
+    ws.set(f"{column_letter(left11 + 11)}3", "Remarks")  # Loader 11's day-total header made unreadable
+    block = locate_block(grid_of(ws), 11, "card", DEFAULT_COLUMN_MAP)
+    assert block.region.title == "Loader 11 Card Details"  # not "card block ambiguous"

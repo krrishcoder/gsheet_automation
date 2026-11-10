@@ -2,7 +2,8 @@
 
 Everything comes from the loader's month tab, as the sheet computes it:
 
-* trips and quantity: the month's shift values in the loader's shift table, or, for a loader kept
+* trips and quantity: the month's shift values in the loader's shift table (the WhatsApp report)
+  and, when the loader has a card block, the card's trips and Est. Weight too; or, for a loader kept
   as one row per day ("Loader 8"), its Total TRIP and Quantity columns; such a loader also gets its
   per-trip avg: the month's HSD ÷ trips, and the latest day's "Per trip avg"
 * diesel avg: the latest refill's avg in the refill log ("Loader 11 hsd avg"), in L per HM hour
@@ -58,6 +59,9 @@ class LoaderSummary:
     diesel_hm: str | None = None  # HM of that refill
     speed: str | None = None
     speed_at: tuple[date, int] | None = None  # (day, shift)
+    card_trips: int | None = None  # the trip card's figures (card block), next to the report's
+    card_quantity: Decimal | None = None
+    card_till: date | None = None
     trip_avg_month: str | None = None  # litres per trip over the month (HSD ÷ trips)
     trip_avg_latest: str | None = None  # the latest day's "Per trip avg"
     trip_avg_day: date | None = None
@@ -148,6 +152,7 @@ class SummaryService:
             self._fill_daily(s, daily)
         else:
             self._fill_shifts(s, table, layout)
+            self._fill_card(s, grid)
             self._diesel(s, grid)
             self._speed(s, grid)
         s.operating_profit = self._labelled(grid, s.loader_number, _OPERATING_PROFIT_RE)
@@ -184,6 +189,40 @@ class SummaryService:
             s.diesel_avg = _three_decimals(block.grid.cell(latest, block.columns["avg"]))
             hm = block.grid.cell(latest, block.columns["hm"]) if "hm" in block.columns else CellValue()
             s.diesel_hm = None if hm.is_empty else _three_decimals(hm)
+
+    def _fill_card(self, s: LoaderSummary, grid: SheetGrid) -> None:
+        """The trip card's month totals: trips of the three shifts, and its Est. Weight column."""
+        card = self._block(grid, s.loader_number, "card")
+        if card is None:
+            return
+        s.card_trips = 0
+        s.card_quantity = Decimal(0) if "qty" in card.columns else None
+        for row, day in date_rows_summary(card.grid, card.layout):
+            if (day.year, day.month) != (s.year, s.month):
+                continue
+            trips = [card.grid.cell(row, card.columns[f"trips{n}"]) for n in (1, 2, 3)]
+            if any(_positive(t) for t in trips):
+                s.card_till = day
+                s.card_trips += sum(int(t.effective) for t in trips if _positive(t))
+            if s.card_quantity is not None and _positive(card.grid.cell(row, card.columns["qty"])):
+                s.card_quantity += Decimal(str(card.grid.cell(row, card.columns["qty"]).effective))
+        # The sheet's own total wins: Est. Weight's Total is month avg weight × card trips, not the
+        # sum of the days (each day uses that day's avg).
+        total = self._total_cell(card, "qty")
+        if total is not None:
+            s.card_quantity = Decimal(str(total.effective))
+
+    @staticmethod
+    def _total_cell(block, key: str) -> CellValue | None:
+        """The cell in the block's "Total" row (the word Total in its Date column) for this column."""
+        if key not in block.columns:
+            return None
+        date_col = block.layout.col(Col.DATE)
+        for row in range(block.layout.data_start_row, block.grid.last_row + 1):
+            if normalize_label(block.grid.cell(row, date_col).text) == "total":
+                cell = block.grid.cell(row, block.columns[key])
+                return cell if _positive(cell) else None
+        return None
 
     def _fill_shifts(self, s: LoaderSummary, table: SheetGrid, layout) -> None:
         for row, day in date_rows_summary(table, layout):
@@ -267,9 +306,19 @@ def render_summary(summaries: list[LoaderSummary], *, note: str | None = None) -
         lines.append("")
         till = f" (till {s.till:%d-%m})" if s.till else ""
         lines.append(f"*Loader {s.loader_number:02d}*{till}")
-        lines.append(f"Trips: {s.trips:,}")
-        if s.quantity is not None:
-            lines.append(f"Quantity: {s.quantity:,.2f} MT")
+        if s.card_trips is not None:
+            # two sources that differ on purpose: the CHP WhatsApp report and the operator's trip card
+            lines.append(f"WhatsApp report: {s.trips:,} trips · {s.quantity:,.2f} MT")
+            if s.card_trips:
+                card_qty = f" · {s.card_quantity:,.2f} MT" if s.card_quantity is not None else ""
+                card_till = f" (till {s.card_till:%d-%m})" if s.card_till and s.card_till != s.till else ""
+                lines.append(f"Card details: {s.card_trips:,} trips{card_qty}{card_till}")
+            else:
+                lines.append("Card details: no entries yet")
+        else:
+            lines.append(f"Trips: {s.trips:,}")
+            if s.quantity is not None:
+                lines.append(f"Quantity: {s.quantity:,.2f} MT")
         if s.trip_avg_month:
             latest = f", {s.trip_avg_latest} on {s.trip_avg_day:%d-%m}" if s.trip_avg_latest and s.trip_avg_day else ""
             lines.append(f"Per trip avg: {s.trip_avg_month} L/trip (month){latest}")

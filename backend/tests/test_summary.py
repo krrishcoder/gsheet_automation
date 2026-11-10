@@ -54,7 +54,8 @@ def test_summary_follows_a_report_update(boss_bot):
     assert "*Loader 01* (till 06-11)\nTrips: 42\nQuantity: 1,340.84 MT\n" in text
     assert "*Loader 05* (till 06-11)\nTrips: 43\nQuantity: 1,411.93 MT" in text
     loader11 = text.split("*Loader 11*", 1)[1]
-    assert loader11.startswith(" (till 06-11)\nTrips: 21\nQuantity: 696.38 MT\n")
+    # Loader 11 has a card block: the WhatsApp report's and the trip card's figures, side by side
+    assert loader11.startswith(" (till 06-11)\nWhatsApp report: 21 trips · 696.38 MT\nCard details: no entries yet\n")
     assert "Diesel avg: 16.146 L/h (last refill, HM 4276.2)" in loader11  # the latest refill, not a month average
     assert "Speed: 8.432 min/trip (10-11, 1st shift)" in loader11  # 3rd shift #DIV/0! and 2nd shift 0 skipped
     assert "Net operating profit: ₹71,514.61" in loader11 and "Profit with GST: ₹124,606.06" in loader11
@@ -145,3 +146,16 @@ def test_summary_limited_to_chosen_loaders(boss_bot):
 
     assert "covers <b>every loader</b>" in bot.send("/summary_loaders all", user_id=ADMIN_ID)["text"]
     assert "Loader 01" in bot.send("/summary", user_id=ADMIN_ID)["text"]
+
+
+def test_card_figures_next_to_the_report(boss_bot):
+    bot = boss_bot
+    ws = bot.sheets.tab(SHARED_ID, "Loader Report nov 2026")
+    bot.confirm(bot.send(SAMPLE_REPORT, user_id=ADMIN_ID), user_id=ADMIN_ID)  # report: 21 trips, 696.38 MT on 06-11
+    for ref, value in (("F48", 36), ("G48", 37), ("F49", 30), ("J48", 1200.0), ("J49", 500.0)):
+        ws.set(ref, value)  # card: 06-11 36 + 37 trips, 07-11 30; Est. Weight 1200 + 500
+    text = bot.send("/summary 11", user_id=ADMIN_ID)["text"]
+    assert "WhatsApp report: 21 trips · 696.38 MT\nCard details: 103 trips · 1,700.00 MT (till 07-11)" in text
+    ws.set("D73", "Total")
+    ws.set("J73", 1690.25, formula="=W35*P73")  # the sheet's own total (avg weight × trips) wins over the sum
+    assert "Card details: 103 trips · 1,690.25 MT (till 07-11)" in bot.send("/summary 11", user_id=ADMIN_ID)["text"]

@@ -122,7 +122,7 @@ backend/
 │   ├── schemas/report.py, telegram.py, sheets.py
 │   └── core/config.py, security.py, logging.py
 ├── scripts/set_webhook.py          register / inspect / delete the webhook
-├── tests/                          270 tests, external APIs faked
+├── tests/                          276 tests, external APIs faked
 ├── deploy/Caddyfile                HTTPS reverse proxy (EC2)
 ├── Dockerfile, docker-compose.yml, .env.example, requirements*.txt
 ```
@@ -313,8 +313,8 @@ send needs the WhatsApp Business API; iPhones cannot send SMS by themselves.)
 Updated: 09-11 3rd Shift
 
 *Loader 11* (till 10-11)
-Trips: 969
-Quantity: 32,349.63 MT
+WhatsApp report: 1,046 trips · 34,884.31 MT
+Card details: 1,098 trips · 36,618.52 MT
 Diesel avg: 16.146 L/h (last refill, HM 4276.2)
 Speed: 8.432 min/trip (10-11, 1st shift)
 Net operating profit: ₹78,868.07
@@ -322,7 +322,9 @@ Profit with GST: ₹139,201.66
 ```
 
 * Everything is read from the loader's month tab right after the update, as the sheet computes it:
-  trips and quantity from the shift table (the CHP report figures, month to date); **diesel avg**
+  trips and quantity from the shift table (the CHP report figures, month to date); for a loader
+  with a card block, the **card's** trips (its three shifts) and quantity (the Total of its
+  *Est. Weight (MT)* column, else the sum of the days) on a second line; **diesel avg**
   = the latest refill's avg in *Loader NN hsd avg*; **speed** = the latest shift with a speed in
   *Loader NN Per trip Speed* (0 and #DIV/0! are skipped); **profits** = the numbers next to
   "Operating Profit (Pre-GST)" and "Profit With Gst" inside the loader's blocks. A figure a loader
@@ -517,7 +519,7 @@ Tables are created at startup (`create_all`).
 
 ## 11. Testing
 
-`pytest` runs 270 tests with fake Telegram and in-memory Google Sheets: parser variants (shifts,
+`pytest` runs 276 tests with fake Telegram and in-memory Google Sheets: parser variants (shifts,
 dates, Nil, PC, duplicates), totals validation, header detection (single/two-tier/merged/moved
 columns/not row 1), date-row matching (serials and text), column mapping, averages and totals,
 preservation of other cells and formulas, worksheet routing, authorisation per loader, corrections
